@@ -1,0 +1,45 @@
+{
+  "records": [
+    {
+      "trade_date": "2025-01-06",
+      "trade_time": "09:45:00",
+      "code": "600519",
+      "name": "贵州茅台",
+      "side": "buy",
+      "price": 100,
+      "quantity": 100,
+      "fee": 5,
+      "client_request_id": "seed-maotai-buy-1"
+    },
+    {
+      "trade_date": "2025-01-07",
+      "trade_time": "10:10:00",
+      "code": "600519",
+      "name": "贵州茅台",
+      "side": "buy",
+      "price": 110,
+      "quantity": 100,
+      "fee": 5,
+      "client_request_id": "seed-maotai-buy-2"
+    },
+    {
+      "trade_date": "2025-01-08",
+      "trade_time": "14:20:00",
+      "code": "600519",
+      "name": "贵州茅台",
+      "side": "sell",
+      "price": 120,
+      "quantity": 150,
+      "fee": 5,
+      "tax": 15,
+      "client_request_id": "seed-maotai-sell-1"
+    }
+  ],
+  "reviews": [
+    {
+      "date": "2025-01-08",
+      "content": "按计划减仓，复查剩余持仓的风险与止盈位置。",
+      "tags": ["复盘", "减仓"]
+    }
+  ]
+}
