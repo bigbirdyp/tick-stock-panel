@@ -51,14 +51,20 @@ const QUOTES = new Map<string, QuoteMark>([
   }],
 ])
 
-/** 行情日历日晚于 as_of 时不能用于该日持仓，避免用未来价格估算历史市值。 */
+/**
+ * 行情日历日晚于 as_of 时不用，避免用未来价格估算历史市值。
+ * 早于 as_of 的可用价仍返回，但标为 stale。本 mock 只有一条行情，
+ * 任何更晚的 as_of 都按过期处理，不推断交易日历。
+ */
 function quotesOnOrBefore(asOf: string): Map<string, QuoteMark> {
   const usable = new Map<string, QuoteMark>()
   for (const [symbol, quote] of QUOTES) {
     if (quote.price_as_of == null || quote.current_price == null || quote.price_status === 'unavailable') continue
     const parsed = new Date(quote.price_as_of)
     if (Number.isNaN(parsed.getTime())) continue
-    if (shanghaiToday(parsed) <= asOf) usable.set(symbol, quote)
+    const quoteDay = shanghaiToday(parsed)
+    if (quoteDay > asOf) continue
+    usable.set(symbol, quoteDay < asOf ? { ...quote, price_status: 'stale' } : quote)
   }
   return usable
 }

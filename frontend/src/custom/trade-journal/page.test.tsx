@@ -52,3 +52,35 @@ it('渲染持仓和按卖出记录聚合的历史收益，并可切换栏目', a
   await vi.waitFor(() => expect(container.textContent).toContain('指数缩量震荡'))
   expect(container.textContent).toContain('指数缩量震荡')
 })
+
+it('截止日期晚于行情日时，持仓表标出过期并仍显示旧价', async () => {
+  notifyManager.setNotifyFunction(callback => { act(callback) })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  dispose = async () => {
+    await act(async () => root.unmount())
+    client.clear()
+    container.remove()
+  }
+
+  await act(async () => {
+    root.render(<QueryClientProvider client={client}><TradeJournalPage /></QueryClientProvider>)
+  })
+  await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
+
+  const dateInput = container.querySelector<HTMLInputElement>('[aria-label="持仓截止日期"]')
+  expect(dateInput).not.toBeNull()
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+  await act(async () => {
+    nativeSetter.call(dateInput, '2026-10-13')
+    dateInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    dateInput!.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+
+  const maotaiRow = () => Array.from(container.querySelectorAll('tr')).find(row => row.textContent?.includes('贵州茅台'))
+  await vi.waitFor(() => expect(maotaiRow()?.textContent).toContain('过期'))
+  expect(maotaiRow()?.textContent).toContain('1,712.3000')
+  expect(maotaiRow()?.textContent).not.toContain('不可用')
+})

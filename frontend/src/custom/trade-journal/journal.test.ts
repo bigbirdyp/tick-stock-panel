@@ -116,6 +116,22 @@ describe('契约形状的开发 mock', () => {
       price_status: 'fresh',
     })
   })
+
+  it('as_of 晚于唯一行情日时仍返回该价，并标为 stale', async () => {
+    const api = createMockTradeJournal()
+    await api.createRecord(buy)
+    const later = (await api.currentPositions({ as_of: '2026-10-13' })).data
+    expect(later.as_of).toBe('2026-10-13')
+    expect(later.positions).toHaveLength(1)
+    expect(later.positions[0]).toMatchObject({
+      symbol: '600519.SH',
+      current_price: 1712.3,
+      price_source: 'local_daily',
+      price_as_of: '2026-10-12T15:00:00+08:00',
+      price_status: 'stale',
+    })
+    expect(later.positions[0].market_value).not.toBeNull()
+  })
 })
 
 describe('同源 HTTP 客户端', () => {
