@@ -129,6 +129,24 @@ test('FIFO aggregates two buy lots into one sell row and keeps exact remaining c
   assert.equal(earlier.body.data.positions[0].cost_amount, 1005);
 });
 
+test('history pnl rounds the exact exit-minus-cost difference, not the rounded amounts', async (t) => {
+  const { request } = await harness(t);
+  const buy = await request('POST', '/api/records', trade({ price: 10.005, quantity: 1, fee: 0, tax: 0 }));
+  const sell = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-07', side: 'sell', price: 10.014, quantity: 1, fee: 0, tax: 0,
+  }));
+  assert.equal(buy.status, 201);
+  assert.equal(sell.status, 201);
+  const history = await request('GET', '/api/positions/history');
+  const row = history.body.data.history[0];
+  assert.equal(row.cost_amount, 10.01);
+  assert.equal(row.exit_amount, 10.01);
+  assert.equal(row.cost, 10.01);
+  assert.equal(row.realized_pnl, 0.01);
+  assert.equal(row.return_rate, 0.0009);
+  assert.deepEqual((await request('GET', '/api/positions/current?as_of=2025-01-07')).body.data.positions, []);
+});
+
 test('no-short is checked over the entire chronological path on create, patch, and delete', async (t) => {
   const { request } = await harness(t);
   const buy = await request('POST', '/api/records', trade());

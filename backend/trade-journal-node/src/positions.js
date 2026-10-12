@@ -72,8 +72,9 @@ export function derive(records) {
     if (remaining > 0) throw new ApiError(409, 'INSUFFICIENT_POSITION', `卖出 ${record.symbol} 超过此前持仓`);
     state.lots = state.lots.filter((lot) => lot.quantity > 0);
     const exitAmount = decimalUnits(record.price) * BigInt(record.quantity) - decimalUnits(record.fee) - decimalUnits(record.tax);
-    const exitCents = roundDivide(exitAmount, 1_000_000n);
-    const costCents = roundDivide(consumedCost, 1_000_000n);
+    // Subtract the exact 1e-8 amounts. Rounding each side to cents first turns
+    // a 0.009 gain (10.014 - 10.005) into 10.01 - 10.01 = 0.
+    const realized = exitAmount - consumedCost;
     history.push({
       history_id: record.id,
       sell_record_id: record.id,
@@ -86,10 +87,10 @@ export function derive(records) {
       quantity: record.quantity,
       cost: averagePrice(consumedCost, record.quantity),
       exit_price: Number(record.price),
-      cost_amount: Number(costCents) / 100,
-      exit_amount: Number(exitCents) / 100,
-      realized_pnl: Number(exitCents - costCents) / 100,
-      return_rate: ratio(exitCents - costCents, costCents),
+      cost_amount: roundedNumber(consumedCost, 2),
+      exit_amount: roundedNumber(exitAmount, 2),
+      realized_pnl: roundedNumber(realized, 2),
+      return_rate: ratio(realized, consumedCost),
       holding_days: (Date.parse(`${record.trade_date}T00:00:00Z`) - Date.parse(`${openDate}T00:00:00Z`)) / 86_400_000,
       sell_trade_time: record.trade_time,
       sell_created_at: record.created_at,
