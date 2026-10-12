@@ -1,9 +1,8 @@
-import { dataFile } from './config.js';
+import { dataFile, journalPort } from './config.js';
 import { createApp } from './server.js';
 import { JournalStore } from './store.js';
 
-const port = Number(process.env.PORT || 3022);
-if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port');
+const port = journalPort();
 
 const server = createApp(new JournalStore(dataFile));
 server.listen(port, '127.0.0.1', () => {
