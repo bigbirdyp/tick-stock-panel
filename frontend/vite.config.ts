@@ -6,6 +6,10 @@ const backendHost = process.env.BACKEND_HOST || '127.0.0.1'
 const proxyHost = ['0.0.0.0', '::'].includes(backendHost) ? '127.0.0.1' : backendHost
 const backendPort = process.env.BACKEND_PORT || '3018'
 const backendTarget = `http://${proxyHost}:${backendPort}`
+const tradeJournalTarget = 'http://127.0.0.1:3022'
+
+// Vite 正则代理优先于通用 /api；仅 docs/api.md §1.1 的路径进 Node。
+const tradeJournalPaths = '^/api/(?:records(?:[/?]|$)|reviews(?:[/?]|$)|positions/(?:current|history)(?:\\?|$))'
 
 export default defineConfig({
   plugins: [react()],
@@ -18,6 +22,7 @@ export default defineConfig({
     host: '0.0.0.0',   // dev.sh / dev.ps1 会用 CLI --host 覆盖
     port: 3011,
     proxy: {
+      [tradeJournalPaths]: tradeJournalTarget,
       // dev 时 /api 转发到与启动脚本相同的 FastAPI 地址
       '/api': {
         target: backendTarget,

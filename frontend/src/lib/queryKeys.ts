@@ -141,6 +141,13 @@ export const QK = {
   sectorRotationIndexDaily:  (symbol: string) => ['sector-rotation-index-daily', symbol] as const,
   // 扩展表 schema 清单 (板块切换的资金流列选择器等)
   extSchemaAll:         ['ext-schema-all'] as const,
+
+  // 交易日记 (docs/api.md)。写入后统一失效相关查询。
+  tradeJournal:         ['trade-journal'] as const,
+  tradeJournalRecords:  (query: string) => ['trade-journal', 'records', query] as const,
+  tradeJournalReviews:  (query: string) => ['trade-journal', 'reviews', query] as const,
+  tradeJournalPositions:(query: string) => ['trade-journal', 'positions', query] as const,
+  tradeJournalHistory:  (query: string) => ['trade-journal', 'history', query] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
