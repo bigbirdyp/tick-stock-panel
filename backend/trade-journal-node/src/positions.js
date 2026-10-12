@@ -1,5 +1,5 @@
 import { ApiError } from './validation.js';
-import { decimalUnits, ratio, roundDivide, roundedNumber } from './money.js';
+import { averagePrice, decimalUnits, ratio, roundDivide, roundedNumber } from './money.js';
 
 function compare(left, right, direction = 1) {
   if (left === right) return 0;
@@ -72,7 +72,6 @@ export function derive(records) {
     if (remaining > 0) throw new ApiError(409, 'INSUFFICIENT_POSITION', `卖出 ${record.symbol} 超过此前持仓`);
     state.lots = state.lots.filter((lot) => lot.quantity > 0);
     const exitAmount = decimalUnits(record.price) * BigInt(record.quantity) - decimalUnits(record.fee) - decimalUnits(record.tax);
-    const pnl = exitAmount - consumedCost;
     const exitCents = roundDivide(exitAmount, 1_000_000n);
     const costCents = roundDivide(consumedCost, 1_000_000n);
     history.push({
@@ -85,12 +84,12 @@ export function derive(records) {
       open_date: openDate,
       close_date: record.trade_date,
       quantity: record.quantity,
-      cost: roundedNumber(roundDivide(consumedCost, BigInt(record.quantity)), 4),
+      cost: averagePrice(consumedCost, record.quantity),
       exit_price: Number(record.price),
       cost_amount: Number(costCents) / 100,
       exit_amount: Number(exitCents) / 100,
       realized_pnl: Number(exitCents - costCents) / 100,
-      return_rate: ratio(pnl, consumedCost),
+      return_rate: ratio(exitCents - costCents, costCents),
       holding_days: (Date.parse(`${record.trade_date}T00:00:00Z`) - Date.parse(`${openDate}T00:00:00Z`)) / 86_400_000,
       sell_trade_time: record.trade_time,
       sell_created_at: record.created_at,
@@ -113,7 +112,7 @@ export function currentPositions(records) {
       name: state.name,
       open_date: state.lots.reduce((min, lot) => lot.openDate < min ? lot.openDate : min, state.lots[0].openDate),
       quantity,
-      cost: roundedNumber(roundDivide(costAmount, BigInt(quantity)), 4),
+      cost: averagePrice(costAmount, quantity),
       cost_amount: roundedNumber(costAmount, 2),
       current_price: null,
       price_source: null,
