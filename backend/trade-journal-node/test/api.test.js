@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { journalPort } from '../src/config.js';
 import { createApp } from '../src/server.js';
 import { JournalStore } from '../src/store.js';
 import { recordInput } from '../src/validation.js';
@@ -373,6 +374,46 @@ test('invalid JSON root types and unknown or mistyped query parameters use contr
   const wrongResource = await request('GET', '/api/positions/current?side=buy');
   assert.equal(wrongResource.status, 422);
   assert.equal(wrongResource.body.error.details.fields[0].path, 'side');
+});
+
+test('current positions serve the dev query, an empty book, unavailable quotes, and every contract sort', async (t) => {
+  const { request } = await harness(t);
+  const exact = await request('GET', '/api/positions/current?as_of=2026-10-12&limit=20&offset=0&sort=symbol_asc');
+  assert.equal(exact.status, 200);
+  assert.equal(exact.body.data.as_of, '2026-10-12');
+  assert.deepEqual(exact.body.data.positions, []);
+  assert.deepEqual(exact.body.data.pagination, { limit: 20, offset: 0, total: 0, has_more: false });
+
+  assert.equal((await request('POST', '/api/records', trade({ trade_date: '2026-10-10', code: '600519', name: '贵州茅台' }))).status, 201);
+  assert.equal((await request('POST', '/api/records', trade({ trade_date: '2026-10-10', code: '000001', name: '平安银行' }))).status, 201);
+  const beforeOpen = await request('GET', '/api/positions/current?as_of=2026-10-09&limit=20&offset=0&sort=symbol_asc');
+  assert.equal(beforeOpen.status, 200);
+  assert.deepEqual(beforeOpen.body.data.positions, []);
+
+  for (const sort of ['symbol_asc', 'market_value_desc', 'return_rate_desc']) {
+    const response = await request('GET', `/api/positions/current?as_of=2026-10-12&limit=20&offset=0&sort=${sort}`);
+    assert.equal(response.status, 200, sort);
+    const positions = response.body.data.positions;
+    assert.deepEqual(positions.map((row) => row.symbol), ['000001.SZ', '600519.SH'], sort);
+    assert.deepEqual(response.body.data.pagination, { limit: 20, offset: 0, total: 2, has_more: false });
+    for (const row of positions) {
+      assert.equal(row.price_status, 'unavailable');
+      assert.equal(row.current_price, null);
+      assert.equal(row.price_source, null);
+      assert.equal(row.price_as_of, null);
+      assert.equal(row.market_value, null);
+      assert.equal(row.unrealized_pnl, null);
+      assert.equal(row.return_rate, null);
+    }
+  }
+});
+
+test('journal listen port stays on the contract default when ambient PORT is taken', () => {
+  assert.equal(journalPort({ PORT: '3457' }), 3022);
+  assert.equal(journalPort({ PORT: '3018', TRADE_JOURNAL_PORT: '' }), 3022);
+  assert.equal(journalPort({ TRADE_JOURNAL_PORT: '3023' }), 3023);
+  assert.throws(() => journalPort({ TRADE_JOURNAL_PORT: '0' }), /TRADE_JOURNAL_PORT/);
+  assert.throws(() => journalPort({ TRADE_JOURNAL_PORT: '65536' }), /TRADE_JOURNAL_PORT/);
 });
 
 test('seed command is idempotent and produces current/history/review fixtures', () => {
