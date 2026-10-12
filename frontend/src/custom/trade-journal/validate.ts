@@ -240,5 +240,13 @@ export function validateCodeFilter(code: string | undefined): RecordIssue | null
       fields: [{ path: 'code', message: '必须是六位数字代码' }],
     }
   }
+  if (resolveSymbol(code) == null) {
+    return {
+      status: 422,
+      code: 'INVALID_STOCK_CODE',
+      message: '股票代码无法规范化',
+      fields: [{ path: 'code', message: '无法识别交易所' }],
+    }
+  }
   return null
 }

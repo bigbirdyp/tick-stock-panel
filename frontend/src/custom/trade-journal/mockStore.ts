@@ -51,6 +51,18 @@ const QUOTES = new Map<string, QuoteMark>([
   }],
 ])
 
+/** 行情日历日晚于 as_of 时不能用于该日持仓，避免用未来价格估算历史市值。 */
+function quotesOnOrBefore(asOf: string): Map<string, QuoteMark> {
+  const usable = new Map<string, QuoteMark>()
+  for (const [symbol, quote] of QUOTES) {
+    if (quote.price_as_of == null || quote.current_price == null || quote.price_status === 'unavailable') continue
+    const parsed = new Date(quote.price_as_of)
+    if (Number.isNaN(parsed.getTime())) continue
+    if (shanghaiToday(parsed) <= asOf) usable.set(symbol, quote)
+  }
+  return usable
+}
+
 function fail(issue: RecordIssue): never {
   throw new TradeJournalError(issue.status, issue.code, issue.message, issue.fields)
 }
@@ -360,7 +372,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (codeIssue) fail(codeIssue)
       const asOf = query.as_of ?? shanghaiToday()
       const included = [...records.values()].filter(record => record.trade_date <= asOf)
-      const built = buildPortfolio(included, QUOTES)
+      const built = buildPortfolio(included, quotesOnOrBefore(asOf))
       if (!built.ok) throw new TradeJournalError(500, 'INTERNAL_ERROR', '持仓计算失败')
       let positions = built.positions
       if (query.code) positions = positions.filter(position => position.code === query.code)
