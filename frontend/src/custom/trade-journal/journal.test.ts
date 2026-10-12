@@ -88,6 +88,34 @@ describe('契约形状的开发 mock', () => {
     await api.deleteReview(review.data.id, 2)
     expect((await api.listReviews({})).data.pagination.total).toBe(0)
   })
+
+  it('拒绝 900901，且 as_of 早于行情日时不使用该行情', async () => {
+    const api = createMockTradeJournal()
+    await expect(api.createRecord({ ...buy, code: '900901', name: 'B股', client_request_id: 'bshare-900901' })).rejects.toMatchObject({
+      status: 422,
+      code: 'INVALID_STOCK_CODE',
+    })
+    await api.createRecord({ ...buy, trade_date: '2026-10-01', client_request_id: 'early-maotai' })
+    const historical = (await api.currentPositions({ as_of: '2026-10-01' })).data
+    expect(historical.positions).toHaveLength(1)
+    expect(historical.positions[0]).toMatchObject({
+      symbol: '600519.SH',
+      quantity: 100,
+      current_price: null,
+      price_source: null,
+      price_as_of: null,
+      price_status: 'unavailable',
+      market_value: null,
+      unrealized_pnl: null,
+      return_rate: null,
+    })
+    const sameDay = (await api.currentPositions({ as_of: '2026-10-12' })).data
+    expect(sameDay.positions[0]).toMatchObject({
+      current_price: 1712.3,
+      price_as_of: '2026-10-12T15:00:00+08:00',
+      price_status: 'fresh',
+    })
+  })
 })
 
 describe('同源 HTTP 客户端', () => {
