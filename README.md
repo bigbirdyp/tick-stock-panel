@@ -504,6 +504,76 @@ xattr -dr com.apple.quarantine /Applications/TSP.app
 
 </details>
 
+### 交易日记本地开发（Node sidecar）
+
+交易日记是可选 sidecar：浏览器仍只请求同源 `/api`，**不要**把 Node 地址配成前端 `baseURL` 或公开 API origin。契约见 [docs/api.md](./docs/api.md)。**前后端联调尚未作为整体验证通过**；下列命令只覆盖 sidecar 与 Vite 路径代理的本地启动方式。
+
+**1. 启动 Node sidecar（Node ≥ 20，仅 loopback `127.0.0.1:3022`）**
+
+```bash
+cd backend/trade-journal-node
+npm start    # 等价于 node src/index.js；默认 PORT=3022，监听 127.0.0.1
+```
+
+持久化文件默认是 `backend/trade-journal-node/.data/journal.json`；可用环境变量 `TRADE_JOURNAL_DATA_FILE` 覆盖。可选灌入示例数据：
+
+```bash
+cd backend/trade-journal-node
+npm run seed # 写入上述数据文件
+```
+
+**2. 启动 Vite 前端（路径级 `/api` 代理）**
+
+```bash
+cd frontend
+pnpm dev     # http://localhost:3011
+```
+
+`frontend/vite.config.ts` 仅把 `/api/records`、`/api/reviews`、`/api/positions/current`、`/api/positions/history`（含子路径）转到 `http://127.0.0.1:3022`；其余 `/api` 与 `/health` 仍走 FastAPI（默认 `127.0.0.1:3018`）。主站其他页面仍需按上方 Dev 模式启动 FastAPI。
+
+默认走真实同源 API。仅当前后端未联通、要看页面示例数据时再显式开启 mock：
+
+```bash
+cd frontend
+VITE_TRADE_JOURNAL_SOURCE=mock pnpm dev
+```
+
+> ⚠️ Vite 把交易日记路径直连 Node 时，**不会**经过 FastAPI 的访问密码 / 会话等认证中间件。该直连代理只适用于本机开发，**不得对外暴露**。
+
+**3. 本机 curl 示例（打 loopback sidecar；若本机启用了 HTTP 代理，对 `127.0.0.1` 加 `--noproxy '*'`）**
+
+```bash
+# 创建交易记录
+curl --noproxy '*' -sS -X POST http://127.0.0.1:3022/api/records \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{
+    "trade_date": "2026-10-12",
+    "trade_time": "10:35:12",
+    "code": "600519",
+    "name": "贵州茅台",
+    "side": "buy",
+    "price": 1688.5,
+    "quantity": 100,
+    "fee": 5,
+    "tax": 0,
+    "note": "突破前高后小仓位试单",
+    "client_request_id": "web-20261012-0001"
+  }'
+
+# 创建每日复盘
+curl --noproxy '*' -sS -X POST http://127.0.0.1:3022/api/reviews \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{
+    "date": "2026-10-12",
+    "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
+    "tags": ["缩量", "题材分歧", "等待确认"]
+  }'
+
+# 当前持仓 / 历史已实现收益
+curl --noproxy '*' -sS 'http://127.0.0.1:3022/api/positions/current'
+curl --noproxy '*' -sS 'http://127.0.0.1:3022/api/positions/history'
+```
+
 ### 跑起来后的第一次使用
 
 1. **设置 → 凭据与能力** → 点 **重新检测**,确认档位标签与能力路由矩阵
