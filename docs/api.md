@@ -1,19 +1,19 @@
 # 股票记录小应用 API（设计契约）
 
-> 状态：拟议、未实现。本文只约定目标 HTTP JSON 契约，不代表当前 FastAPI、Vite 或任何 Node 服务已经提供这些接口。
+> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。
 >
 > 范围：交易记录、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。
 
-本文档用于前端、后端和文档评审对齐。所有字段、错误码和计算口径都应按本契约实现后再对外声明可用。
+本文档约定 HTTP JSON 契约与计算口径。本地 Node/Vite 路径以当前实现为准；生产边界未落地前，不得把本机直连 Node 当作可对外暴露的认证边界。
 
 ## 1. 服务边界
 
 ### 1.1 路由与运行形态
 
 - 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。浏览器只请求同源 `/api`，不得直接访问 Node 服务 origin。
-- 拟议 Node 服务代码目录为 `backend/trade-journal-node/`。Node 进程在开发态监听 `http://127.0.0.1:3022`；该地址只作为本机开发代理目标，对浏览器客户端保持私有，不得作为前端 `baseURL` 或公开 API origin。
-- 开发态可实现的路由拆分（拟议，未要求当前 `vite.config.ts` 已经配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
-- 本契约不要求、也不假设 FastAPI（`backend/app/`）增加转发路由。开发联调以 Vite 路径拆分为准；生产或 Docker 应用同一同源 `/api` 规则：本文路径落到 Node，其余仍由 FastAPI 处理，且不得让浏览器侧同时出现 Node 与 FastAPI 两个公开 API origin。
+- Node 服务代码目录为 `backend/trade-journal-node/`。开发态监听 `http://127.0.0.1:3022`；该地址只作为本机开发代理目标，对浏览器客户端保持私有，不得作为前端 `baseURL` 或公开 API origin。
+- 开发态路由拆分（当前 `frontend/vite.config.ts` 已配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
+- 本契约不要求、也不假设 FastAPI（`backend/app/`）增加转发路由。开发联调以 Vite 路径拆分为准；生产或 Docker 仍须在上游边界保持同一同源 `/api` 规则：本文路径落到 Node，其余仍由 FastAPI 处理，且不得让浏览器侧同时出现 Node 与 FastAPI 两个公开 API origin。该生产路由与认证边界尚未在本仓库落地。
 
 ### 1.2 认证边界
 
@@ -76,9 +76,10 @@
 | 收益率字段 | number 或 null | 无固定上下限 | 小数制，响应四舍五入到 6 位小数，`0.123456` 表示 `12.3456%` |
 
 - 服务端内部计算应使用十进制定点数，不用二进制浮点作为持久化口径。
+- 所有派生的金额、成本价、市值、盈亏和收益率：先在内部用精确定点值计算，再在序列化到 JSON 时按上表各自精度独立四舍五入。已舍入的响应字段之间不保证算术恒等；客户端不得用已舍入字段反推另一字段。
 - `fee` 表示佣金、过户费等交易费用合计；`tax` 表示印花税等税费。缺省均为 `0`。
-- `gross_amount = price * quantity`。
-- 买入现金流成本为 `gross_amount + fee + tax`。卖出净回收金额为 `gross_amount - fee - tax`。
+- `gross_amount = price * quantity`（内部精确值）。
+- 买入现金流成本为 `gross_amount + fee + tax`。卖出净回收金额为 `gross_amount - fee - tax`（均为内部精确值）。
 
 ### 2.5 分页、排序与空列表
 
@@ -477,20 +478,27 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 ### 6.2 成本、盈亏和收益率
 
+下列公式均指内部十进制定点精确值；响应字段按 §2.4 各自精度独立舍入，不要求已舍入 JSON 值彼此可逆。
+
 定义：
 
 - 买入 lot 初始成本金额：`buy_price * buy_quantity + buy_fee + buy_tax`。
 - 部分卖出消耗成本：`lot_remaining_cost_amount * matched_quantity / lot_remaining_quantity`。
 - 卖出净回收金额：`sell_price * sell_quantity - sell_fee - sell_tax`。如果一笔卖出消耗多个 lot，卖出费税按每个 matched quantity 占该卖出总数量的比例分摊；对外历史收益行再把这些内部匹配批次求和。
-- 已实现盈亏：`allocated_sell_net_amount - consumed_cost_amount`。
-- 已实现收益率：`realized_pnl / consumed_cost_amount`。当 `consumed_cost_amount` 为 `0` 时返回 `null`；正常买入成本不应为 `0`。
-- 当前持仓成本金额：所有未卖出 lot 的剩余成本金额之和。
-- 当前持仓成本价：`cost_amount / quantity`。当 `quantity` 为 `0` 时该标的不出现在当前持仓。
-- 当前市值：`current_price * quantity`。`current_price` 为 `null` 时返回 `null`。
-- 未实现盈亏：`market_value - cost_amount`。`market_value` 为 `null` 时返回 `null`。
-- 未实现收益率：`unrealized_pnl / cost_amount`。`cost_amount` 为 `0` 或价格不可用时返回 `null`。
+- 已实现盈亏：精确 `allocated_sell_net_amount - consumed_cost_amount`，再按金额精度舍入为 `realized_pnl`。
+- 已实现收益率：精确 `realized_pnl_exact / consumed_cost_amount`，再按收益率精度舍入。当分母为 `0` 时返回 `null`；正常买入成本不应为 `0`。
+- 当前持仓成本金额：所有未卖出 lot 的剩余成本金额之和，再按金额精度舍入为 `cost_amount`。
+- 当前持仓成本价：精确 `cost_amount_exact / quantity`，再按价格精度舍入为 `cost`。当 `quantity` 为 `0` 时该标的不出现在当前持仓。
+- 当前市值：精确 `current_price * quantity`，再按金额精度舍入。`current_price` 为 `null` 时返回 `null`。
+- 未实现盈亏：精确 `market_value_exact - cost_amount_exact`，再按金额精度舍入。市值不可用时返回 `null`。
+- 未实现收益率：精确 `unrealized_pnl_exact / cost_amount_exact`，再按收益率精度舍入。分母为 `0` 或价格不可用时返回 `null`。
 
-当前持仓和历史收益必须使用同一套 FIFO、费税、分摊和舍入口径。
+精度示例：
+
+- 买入 1 股 `@10.005`，卖出 1 股 `@10.014`，费税均为 `0`：响应 `cost_amount=10.01`、`exit_amount=10.01`，但精确盈亏 `0.009` 舍入为 `realized_pnl=0.01`，`return_rate=0.0009`。此时已舍入的 `exit_amount - cost_amount` 为 `0`，不等于 `realized_pnl`。
+- 买入 3 股 `@10.0001`，费税 `0`：响应 `cost_amount=30.00`，但精确平均成本舍入为 `cost=10.0001`。此时已舍入的 `cost_amount / quantity` 为 `10`，不等于 `cost`。
+
+当前持仓和历史收益必须使用同一套 FIFO、费税、分摊口径；各响应字段仍按 §2.4 独立舍入。
 
 ## 7. 持仓接口
 
@@ -524,15 +532,15 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `name` | string | 否 | 最近一笔相关记录的显示名称 |
 | `open_date` | string | 否 | 当前未平仓 lot 中最早买入日期 |
 | `quantity` | integer | 否 | 当前持仓股数 |
-| `cost` | number | 否 | 当前平均成本价 |
-| `cost_amount` | number | 否 | 当前持仓成本金额 |
+| `cost` | number | 否 | 当前平均成本价；精确成本金额 ÷ 数量后按价格精度独立舍入，不等于已舍入 `cost_amount / quantity` |
+| `cost_amount` | number | 否 | 当前持仓成本金额；精确剩余成本求和后按金额精度舍入 |
 | `current_price` | number | 是 | 最近价格 |
 | `price_source` | string | 是 | 行情来源 |
 | `price_as_of` | string | 是 | 价格时间 |
 | `price_status` | string | 否 | `fresh`、`stale` 或 `unavailable` |
-| `market_value` | number | 是 | 当前市值 |
-| `unrealized_pnl` | number | 是 | 未实现盈亏 |
-| `return_rate` | number | 是 | 未实现收益率，小数制 |
+| `market_value` | number | 是 | 当前市值；精确 `current_price * quantity` 后按金额精度舍入 |
+| `unrealized_pnl` | number | 是 | 未实现盈亏；精确市值与成本差额后按金额精度舍入，不等于已舍入 `market_value - cost_amount` |
+| `return_rate` | number | 是 | 未实现收益率，小数制；精确盈亏 ÷ 精确成本后按收益率精度舍入 |
 
 响应示例：
 
@@ -626,12 +634,12 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `open_date` | string | 否 | 被本次卖出消耗的买入 lot 中最早买入日期 |
 | `close_date` | string | 否 | 卖出记录的 `trade_date` |
 | `quantity` | integer | 否 | 卖出记录数量，等于该行聚合的匹配总数量 |
-| `cost` | number | 否 | 聚合平均成本价，等于 `cost_amount / quantity` |
+| `cost` | number | 否 | 聚合平均成本价；精确消耗成本 ÷ 数量后按价格精度独立舍入，不等于已舍入 `cost_amount / quantity` |
 | `exit_price` | number | 否 | 卖出成交价 |
-| `cost_amount` | number | 否 | 本次卖出消耗的所有买入 lot 成本金额之和 |
-| `exit_amount` | number | 否 | 本次卖出净回收金额，等于卖出总成交额扣除该卖出记录的费税 |
-| `realized_pnl` | number | 否 | 已实现盈亏，等于 `exit_amount - cost_amount` |
-| `return_rate` | number | 是 | 已实现收益率，小数制，等于 `realized_pnl / cost_amount`；分母为 `0` 时为 `null` |
+| `cost_amount` | number | 否 | 本次卖出消耗的所有买入 lot 成本金额之和；精确消耗成本按金额精度舍入 |
+| `exit_amount` | number | 否 | 本次卖出净回收金额；精确净回收（成交额减费税）按金额精度舍入 |
+| `realized_pnl` | number | 否 | 已实现盈亏；精确净回收减精确消耗成本后按金额精度舍入，不等于已舍入 `exit_amount - cost_amount` |
+| `return_rate` | number | 是 | 已实现收益率，小数制；精确盈亏 ÷ 精确消耗成本后按收益率精度舍入；分母为 `0` 时为 `null` |
 | `holding_days` | integer | 否 | `close_date - open_date` 的自然日天数，使用最早被消耗买入 lot 的日期 |
 
 响应示例：
