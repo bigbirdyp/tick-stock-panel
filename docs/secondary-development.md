@@ -65,17 +65,13 @@ AI 在开始任务前必须通过代码搜索确认能力是否已经实现。�
 
 ### 3.2 当前插槽契约
 
-核心页面通过已经实现的 `ExtensionSlot` 提供受控上下文：
+核心页面通过已经实现的 `ExtensionSlot` 提供受控上下文。侧边栏的实际接线如下：
 
 ```tsx
 <ExtensionSlot
-  name="strategy.monitor.filters"
-  context={{
-    apiVersion: 1,
-    rule: draft,
-    updateRule,
-    readOnly,
-  }}
+  name="layout.navigation.extra"
+  context={{ collapsed: railMode, pathname: location.pathname }}
+  compact
 />
 ```
 
@@ -105,7 +101,7 @@ export default extension
 插槽设计必须满足：
 
 - `name` 和注册项 `id` 全局稳定、唯一。
-- `context` 使用明确的 TypeScript 类型，并包含契约版本。
+- 扩展清单通过 `apiVersion` 声明契约版本，`context` 使用明确的 TypeScript 类型。
 - 只暴露完成该插槽职责所需的数据和操作，不传递整个页面状态。
 - 插槽通过公开回调修改状态，不直接访问父组件内部 store 或缓存。
 - 单个扩展渲染失败应由错误边界隔离，并显示可定位的扩展 ID。
@@ -120,7 +116,7 @@ stock-preview.footer
 watchlist.toolbar
 ```
 
-各插槽 context 契约（均要求 `apiVersion: 1`，定义见 `frontend/src/extensions/types.ts` 的 `FrontendSlotContextMap`）：
+扩展注册清单要求 `apiVersion: 1`；各插槽 context 由 `frontend/src/extensions/types.ts` 的 `FrontendSlotContextMap` 定义：
 
 - `layout.navigation.extra`：`{ collapsed, pathname }`，侧边栏导航底部。
 - `stock-preview.footer`：`{ symbol, name, view }`，个股详情对话框底部（日K/分时图表下方）；`view` 为 `'daily' | 'intraday'`。适合个股附加面板：龙虎榜、资金流、外部研究链接等。
@@ -179,7 +175,6 @@ const extension: FrontendExtension = {
 - `ScoringPolicy`：评分计算。
 - `PositionSizingPolicy`：仓位计算。
 - `RiskPolicy`：风险约束。
-- `NotificationFormatter`：通知文案。
 - `StrategyProvider`：策略发现。
 - `MonitorConditionEvaluator`：自定义监控条件。
 - `BacktestCostModel`：手续费和滑点模型。
