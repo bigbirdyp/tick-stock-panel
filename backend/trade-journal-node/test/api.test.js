@@ -213,6 +213,130 @@ test('failed file replacement leaves both disk and memory at their previous stat
   assert.equal((await request('GET', '/api/records')).body.data.pagination.total, 1);
 });
 
+test('PATCH moving a sell between symbols rebuilds both FIFO paths', async (t) => {
+  const { request } = await harness(t);
+  const sourceBuy = await request('POST', '/api/records', trade({ trade_time: '09:30:00', price: 10, quantity: 100, fee: 5 }));
+  const sourceSell = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-08', trade_time: '14:00:00', side: 'sell', price: 15, quantity: 40, fee: 1, tax: 0,
+  }));
+  const consumedLot = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-05', trade_time: '09:30:00', code: '000001', name: '平安银行', price: 8, quantity: 40, fee: 0,
+  }));
+  const remainderLot = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-07', trade_time: '09:30:00', code: '000001', name: '平安银行', price: 10.0001, quantity: 3, fee: 0,
+  }));
+  assert.equal(sourceBuy.status, 201);
+  assert.equal(sourceSell.status, 201);
+  assert.equal((await request('GET', '/api/positions/history?code=600519')).body.data.pagination.total, 1);
+  assert.equal((await request('GET', '/api/positions/current?as_of=2025-01-08&code=600519')).body.data.positions[0].quantity, 60);
+
+  const moved = await request('PATCH', `/api/records/${sourceSell.body.data.id}`, {
+    expected_version: 1, code: '000001', name: '平安银行',
+  });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.body.data.version, 2);
+  assert.equal(moved.body.data.symbol, '000001.SZ');
+  assert.equal(moved.body.data.code, '000001');
+
+  const sourceHistory = await request('GET', '/api/positions/history?code=600519');
+  assert.equal(sourceHistory.body.data.pagination.total, 0);
+  const sourcePosition = (await request('GET', '/api/positions/current?as_of=2025-01-08&code=600519')).body.data.positions[0];
+  assert.equal(sourcePosition.quantity, 100);
+  assert.equal(sourcePosition.cost_amount, 1005);
+  assert.equal(sourcePosition.cost, 10.05);
+
+  const destinationHistory = await request('GET', '/api/positions/history?code=000001');
+  assert.equal(destinationHistory.body.data.pagination.total, 1);
+  const row = destinationHistory.body.data.history[0];
+  assert.equal(row.sell_record_id, sourceSell.body.data.id);
+  assert.deepEqual(row.buy_record_ids, [consumedLot.body.data.id]);
+  assert.equal(row.symbol, '000001.SZ');
+  assert.equal(row.quantity, 40);
+  assert.equal(row.cost_amount, 320);
+  assert.equal(row.cost, 8);
+  assert.equal(row.exit_amount, 599);
+  assert.equal(row.realized_pnl, 279);
+  assert.equal(row.return_rate, 0.871875);
+  assert.equal(row.open_date, '2025-01-05');
+  assert.equal(row.holding_days, 3);
+
+  const destination = (await request('GET', '/api/positions/current?as_of=2025-01-08&code=000001')).body.data.positions[0];
+  assert.equal(destination.quantity, 3);
+  assert.equal(destination.position_key, '000001.SZ');
+  assert.equal(destination.open_date, '2025-01-07');
+  assert.equal(destination.cost_amount, 30);
+  assert.equal(destination.cost, 10);
+  assert.equal((await request('GET', `/api/records/${remainderLot.body.data.id}`)).body.data.symbol, '000001.SZ');
+});
+
+test('PATCH that would short either symbol leaves both FIFO paths unchanged', async (t) => {
+  const { request } = await harness(t);
+  const buy = await request('POST', '/api/records', trade({ quantity: 100, price: 10, fee: 0 }));
+  const sell = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-08', side: 'sell', quantity: 40, price: 11, fee: 0,
+  }));
+  const other = await request('POST', '/api/records', trade({
+    code: '000001', name: '平安银行', quantity: 30, price: 8, fee: 0,
+  }));
+  const beforeSource = await request('GET', '/api/positions/current?as_of=2025-01-08&code=600519');
+  const beforeOther = await request('GET', '/api/positions/current?as_of=2025-01-08&code=000001');
+  const beforeHistory = await request('GET', '/api/positions/history?code=600519');
+
+  const rejected = await request('PATCH', `/api/records/${sell.body.data.id}`, { expected_version: 1, code: '000001' });
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.body.error.code, 'INSUFFICIENT_POSITION');
+  assert.equal((await request('GET', `/api/records/${sell.body.data.id}`)).body.data.code, '600519');
+  assert.equal((await request('GET', `/api/records/${sell.body.data.id}`)).body.data.version, 1);
+  assert.equal((await request('GET', `/api/records/${buy.body.data.id}`)).body.data.version, 1);
+  assert.equal((await request('GET', `/api/records/${other.body.data.id}`)).body.data.version, 1);
+  assert.deepEqual(
+    (await request('GET', '/api/positions/current?as_of=2025-01-08&code=600519')).body.data.positions,
+    beforeSource.body.data.positions,
+  );
+  assert.deepEqual(
+    (await request('GET', '/api/positions/current?as_of=2025-01-08&code=000001')).body.data.positions,
+    beforeOther.body.data.positions,
+  );
+  assert.deepEqual(
+    (await request('GET', '/api/positions/history?code=600519')).body.data.history,
+    beforeHistory.body.data.history,
+  );
+  assert.equal((await request('GET', '/api/positions/history?code=000001')).body.data.pagination.total, 0);
+});
+
+test('invalid JSON root types and unknown or mistyped query parameters use contract error codes', async (t) => {
+  const { request } = await harness(t);
+  for (const raw of ['[]', 'null', '1', '"600519"', 'true']) {
+    const response = await request('POST', '/api/records', undefined, {
+      headers: { 'Content-Type': 'application/json' }, raw,
+    });
+    assert.equal(response.status, 422, raw);
+    assert.equal(response.body.error.code, 'VALIDATION_ERROR');
+    assert.equal(response.body.error.details.fields[0].path, '$');
+  }
+  const syntax = await request('POST', '/api/records', undefined, {
+    headers: { 'Content-Type': 'application/json' }, raw: '{',
+  });
+  assert.equal(syntax.status, 400);
+  assert.equal(syntax.body.error.code, 'BAD_REQUEST');
+  const unknown = await request('GET', '/api/records?page=1');
+  assert.equal(unknown.status, 422);
+  assert.equal(unknown.body.error.code, 'VALIDATION_ERROR');
+  assert.equal(unknown.body.error.details.fields[0].path, 'page');
+  const mistyped = await request('GET', '/api/records?limit=abc');
+  assert.equal(mistyped.status, 422);
+  assert.equal(mistyped.body.error.details.fields[0].path, 'limit');
+  const repeated = await request('GET', '/api/reviews?offset=0&offset=1');
+  assert.equal(repeated.status, 422);
+  assert.equal(repeated.body.error.details.fields[0].path, 'offset');
+  const wrongSort = await request('GET', '/api/positions/history?sort=trade_date_desc');
+  assert.equal(wrongSort.status, 422);
+  assert.equal(wrongSort.body.error.details.fields[0].path, 'sort');
+  const wrongResource = await request('GET', '/api/positions/current?side=buy');
+  assert.equal(wrongResource.status, 422);
+  assert.equal(wrongResource.body.error.details.fields[0].path, 'side');
+});
+
 test('seed command is idempotent and produces current/history/review fixtures', () => {
   const directory = mkdtempSync(join(tmpdir(), 'trade-journal-seed-test-'));
   try {
