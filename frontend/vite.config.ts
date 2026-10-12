@@ -1,6 +1,28 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import type { IncomingMessage } from 'node:http'
 import path from 'node:path'
+import { BlockList, isIP } from 'node:net'
+
+// 交易日记路径直连 Node，不经过 FastAPI 认证。只认内核填的 socket 对端，
+// 不读 Host、Origin、X-Forwarded-For。127/8、::1 和 IPv4-mapped ::ffff:127/8 放行；
+// 没有地址或任何其他地址时返回 false，Vite 的 bypass 会直接回 404，不转发。
+const loopbackPeers = new BlockList()
+loopbackPeers.addSubnet('127.0.0.0', 8, 'ipv4')
+loopbackPeers.addAddress('::1', 'ipv6')
+
+export function isLoopbackPeerAddress(address: string | undefined): boolean {
+  if (!address) return false
+  const bare = address.split('%', 1)[0]?.trim() ?? ''
+  const kind = isIP(bare)
+  if (kind === 4) return loopbackPeers.check(bare, 'ipv4')
+  if (kind === 6) return loopbackPeers.check(bare, 'ipv6')
+  return false
+}
+
+export function tradeJournalProxyBypass(req: IncomingMessage): false | undefined {
+  return isLoopbackPeerAddress(req.socket?.remoteAddress) ? undefined : false
+}
 
 const backendHost = process.env.BACKEND_HOST || '127.0.0.1'
 const proxyHost = ['0.0.0.0', '::'].includes(backendHost) ? '127.0.0.1' : backendHost
@@ -22,7 +44,10 @@ export default defineConfig({
     host: '0.0.0.0',   // dev.sh / dev.ps1 会用 CLI --host 覆盖
     port: 3011,
     proxy: {
-      [tradeJournalPaths]: tradeJournalTarget,
+      [tradeJournalPaths]: {
+        target: tradeJournalTarget,
+        bypass: tradeJournalProxyBypass,
+      },
       // dev 时 /api 转发到与启动脚本相同的 FastAPI 地址
       '/api': {
         target: backendTarget,
