@@ -141,9 +141,29 @@ test('history pnl rounds the exact exit-minus-cost difference, not the rounded a
   const row = history.body.data.history[0];
   assert.equal(row.cost_amount, 10.01);
   assert.equal(row.exit_amount, 10.01);
-  assert.equal(row.cost, 10.01);
+  assert.equal(row.cost, 10.005);
   assert.equal(row.realized_pnl, 0.01);
   assert.equal(row.return_rate, 0.0009);
+  assert.deepEqual((await request('GET', '/api/positions/current?as_of=2025-01-07')).body.data.positions, []);
+});
+
+test('cost rounds exact internal amount per share, including after the lot is closed', async (t) => {
+  const { request } = await harness(t);
+  const buy = await request('POST', '/api/records', trade({ price: 10.0001, quantity: 3, fee: 0, tax: 0 }));
+  assert.equal(buy.status, 201);
+  const open = await request('GET', '/api/positions/current?as_of=2025-01-06');
+  assert.equal(open.body.data.positions[0].quantity, 3);
+  assert.equal(open.body.data.positions[0].cost_amount, 30);
+  assert.equal(open.body.data.positions[0].cost, 10.0001);
+  const sell = await request('POST', '/api/records', trade({
+    trade_date: '2025-01-07', side: 'sell', price: 11, quantity: 3, fee: 0, tax: 0,
+  }));
+  assert.equal(sell.status, 201);
+  const row = (await request('GET', '/api/positions/history')).body.data.history[0];
+  assert.equal(row.cost_amount, 30);
+  assert.equal(row.cost, 10.0001);
+  assert.equal(row.realized_pnl, 3);
+  assert.equal(row.return_rate, 0.099989);
   assert.deepEqual((await request('GET', '/api/positions/current?as_of=2025-01-07')).body.data.positions, []);
 });
 
@@ -283,7 +303,7 @@ test('PATCH moving a sell between symbols rebuilds both FIFO paths', async (t) =
   assert.equal(destination.position_key, '000001.SZ');
   assert.equal(destination.open_date, '2025-01-07');
   assert.equal(destination.cost_amount, 30);
-  assert.equal(destination.cost, 10);
+  assert.equal(destination.cost, 10.0001);
   assert.equal((await request('GET', `/api/records/${remainderLot.body.data.id}`)).body.data.symbol, '000001.SZ');
 });
 

@@ -19,11 +19,11 @@ export function roundedNumber(units, places) {
   return Number(roundDivide(units, divisor)) / 10 ** places;
 }
 
-// Response cost is cost_amount / quantity. cost_amount is already rounded to
-// cents, so the average must divide that cent amount rather than the 1e-8 lot.
+// Cost price is the exact 1e-8 amount divided by quantity, then rounded once
+// to 4 decimals. Dividing the already cent-rounded amount turns 3 * 10.0001
+// into 10.0000, which is not the price field's independent rounding.
 export function averagePrice(amountUnits, quantity) {
-  const cents = roundDivide(amountUnits, 1_000_000n);
-  return roundedNumber(roundDivide(cents * 1_000_000n, BigInt(quantity)), 4);
+  return Number(roundDivide(amountUnits, BigInt(quantity) * 10_000n)) / 10_000;
 }
 
 export function ratio(numerator, denominator) {
