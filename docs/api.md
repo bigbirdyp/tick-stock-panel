@@ -10,16 +10,16 @@
 
 ### 1.1 路由与运行形态
 
-- 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。
-- 拟议 Node 服务代码目录为 `backend/trade-journal-node/`，开发态服务 origin 为 `http://127.0.0.1:3022`。
-- 当前项目已有 FastAPI 与 Vite `/api` 代理。拟议集成方式是：浏览器继续请求同源 `/api`；开发态 Vite 继续把 `/api` 代理到 FastAPI；FastAPI 保留现有 API，并仅在启用该小应用时把本文列出的交易记录、复盘和持仓路径转发到 Node 服务。浏览器不直接请求 `3022` 端口。
-- Docker 或生产形态可以用同一反向代理规则暴露 `/api`，但不得让 Node 服务与现有 FastAPI 在浏览器侧形成两个公开 API origin。
+- 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。浏览器只请求同源 `/api`，不得直接访问 Node 服务 origin。
+- 拟议 Node 服务代码目录为 `backend/trade-journal-node/`。Node 进程在开发态监听 `http://127.0.0.1:3022`；该地址只作为本机开发代理目标，对浏览器客户端保持私有，不得作为前端 `baseURL` 或公开 API origin。
+- 开发态可实现的路由拆分（拟议，未要求当前 `vite.config.ts` 已经配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
+- 本契约不要求、也不假设 FastAPI（`backend/app/`）增加转发路由。开发联调以 Vite 路径拆分为准；生产或 Docker 应用同一同源 `/api` 规则：本文路径落到 Node，其余仍由 FastAPI 处理，且不得让浏览器侧同时出现 Node 与 FastAPI 两个公开 API origin。
 
 ### 1.2 认证边界
 
-- 本契约不假设仓库当前已经存在用户认证中间件，也不定义登录、会话或多用户隔离。
-- 若部署层、FastAPI 或反向代理已经启用访问密码、会话或其他认证，应在请求到达本文接口前完成认证。认证失败使用本文错误 envelope 返回 `401` 或 `403`。
-- v1 目标按本地单用户记录本设计，不接受客户端传入 `user_id`、`owner_id` 或类似身份字段。未来若增加多用户，需另行扩展认证与数据隔离契约。
+- 本契约不定义登录、会话或多用户隔离 API。v1 按本地单用户记录本设计，不接受客户端传入 `user_id`、`owner_id` 或类似身份字段。未来若增加多用户，需另行扩展认证与数据隔离契约。
+- 开发态 Vite 把本文路径直连 Node 时，请求不经过 FastAPI，因此不能继承 FastAPI 现有的访问密码、会话或其他认证中间件。该直连代理只适用于本机开发，不得当作可对外暴露的认证边界。
+- 生产或任何对外暴露形态：必须在反向代理、网关或与 FastAPI 等价的认证边界之后再挂载本文路径；认证失败使用本文错误 envelope 返回 `401` 或 `403`。Node 的 `3022`（或等价内网地址）仍不得对浏览器公开。
 
 ## 2. 通用约定
 
