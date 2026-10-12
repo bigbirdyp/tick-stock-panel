@@ -482,7 +482,7 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+自动检查 / 下载依赖、释放端口，同时启动 FastAPI、交易日记 Node sidecar 和前端。FastAPI → <http://localhost:3018> · Node → <http://127.0.0.1:3022>（仅本机）· 前端 → <http://localhost:3011>。交易日记需要 Node.js 20 或更新版本。
 
 ### 方式 E:桌面客户端(Windows / macOS)
 
@@ -506,19 +506,21 @@ xattr -dr com.apple.quarantine /Applications/TSP.app
 
 ### 交易日记本地开发（Node sidecar）
 
-交易日记是可选 sidecar：浏览器仍只请求同源 `/api`，**不要**把 Node 地址配成前端 `baseURL` 或公开 API origin。契约见 [docs/api.md](./docs/api.md)。下列命令只用于本机三服务联调与 Vite 路径代理；生产认证与同源路由边界仍须另行落地（**不声称**生产认证已实现）。
+交易日记由 Node sidecar 提供：浏览器仍只请求同源 `/api`，**不要**把 Node 地址配成前端 `baseURL` 或公开 API origin。契约见 [docs/api.md](./docs/api.md)。下列命令只用于本机三服务联调与 Vite 路径代理；生产认证与同源路由边界仍须另行落地（**不声称**生产认证已实现）。
 
 只起 Node 时，交易日记 API（`/api/records`、`/api/reviews`、`/api/positions/*`）可独立响应，`curl` 与契约联调不依赖 FastAPI。打开完整 React 壳（设置/布局/onboarding 等会打 `/api/settings`）时，必须另起 FastAPI；否则 Vite 页会停在「加载中」。
 
-完整联调请开 **三个** 终端，按序启动；**不要**再跑 `./dev.sh`——它会自己再起一套 Vite（默认 `3011`），与下面手动前端冲突。
+完整本机联调直接运行 `./dev.sh`，它会一起启动三项服务，并把交易日记 Node 固定在 `127.0.0.1:3022`；通用 `PORT` 只影响 FastAPI，不改变 Node 端口。需要分别控制服务时，也可按下面的顺序在 **三个** 终端手动启动，此时不要再同时运行 `./dev.sh`，以免端口冲突。
+
+仅在本机访问时可用 `HOST=127.0.0.1 ./dev.sh` 同时限制 FastAPI 和 Vite 的监听地址；默认启动脚本仍按 `HOST` / `.env` 配置监听地址。交易日记的 Vite 代理只接受本机回环连接，不能替代生产认证。
 
 **1. Node sidecar（Node ≥ 20，强制 loopback `127.0.0.1:3022`）**
 
-本机若已导出 `PORT`（例如 shell/宿主预置了别的端口），`npm start` 会跟着走那个值，而不是文档里的 `3022`。启动时显式覆盖：
+Node 默认监听 `3022`，不读取通用 `PORT`。手动启动时显式固定交易日记专用端口，避免继承本机的 `TRADE_JOURNAL_PORT`：
 
 ```bash
 cd backend/trade-journal-node
-PORT=3022 npm start    # 等价于 PORT=3022 node src/index.js；只听 127.0.0.1
+TRADE_JOURNAL_PORT=3022 npm start    # 只听 127.0.0.1
 ```
 
 持久化文件默认是 `backend/trade-journal-node/.data/journal.json`；可用环境变量 `TRADE_JOURNAL_DATA_FILE` 覆盖。可选灌入示例数据：
@@ -544,7 +546,7 @@ uv run --no-sync python -m uvicorn app.main:app --reload --host 127.0.0.1 --port
 
 ```bash
 cd frontend
-pnpm dev --host 127.0.0.1 --port 3011    # http://127.0.0.1:3011；勿用默认 0.0.0.0，以免把直连 Node 的代理暴露到局域网
+pnpm dev --host 127.0.0.1 --port 3011    # http://127.0.0.1:3011；本机联调请限制在回环地址
 ```
 
 `frontend/vite.config.ts` 仅把 `/api/records`、`/api/reviews`、`/api/positions/current`、`/api/positions/history`（含子路径）转到 `http://127.0.0.1:3022`；其余 `/api` 与 `/health` 仍走 FastAPI（默认 `127.0.0.1:3018`）。浏览器打开 <http://127.0.0.1:3011>。

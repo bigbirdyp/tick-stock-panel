@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# tickflow-stock-panel — 一键启动前后端
+# tickflow-stock-panel — 一键启动 FastAPI、交易日记 Node 和前端
 #
 # 用法:
-#   ./dev.sh                          # 默认 backend:3018  frontend:3011
+#   ./dev.sh                          # 默认 backend:3018  journal:3022  frontend:3011
 #   BACKEND_PORT=8000 ./dev.sh        # 改后端端口
 #   FRONTEND_PORT=5173 ./dev.sh       # 改前端端口
 #
-# Ctrl-C 同时关闭两端。
+# Ctrl-C 同时关闭三个服务。
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT/backend"
+TRADE_JOURNAL_DIR="$ROOT/backend/trade-journal-node"
 FRONTEND_DIR="$ROOT/frontend"
 
 # Read only the launcher-owned keys from .env. Do not source the whole file:
@@ -88,7 +89,16 @@ require_cmd() {
 }
 
 require_cmd uv   "curl -LsSf https://astral.sh/uv/install.sh | sh"
+require_cmd node "安装 Node.js 20 或更新版本"
 require_cmd pnpm "npm i -g pnpm   或   corepack enable && corepack prepare pnpm@9 --activate"
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+  err "交易日记需要 Node.js 20 或更新版本"
+  exit 1
+fi
+if [[ "$BACKEND_PORT" == "3022" || "$FRONTEND_PORT" == "3022" ]]; then
+  err "端口 3022 留给交易日记，请为 FastAPI 和前端使用其他端口"
+  exit 1
+fi
 
 # ===== 2. 端口占用检查 —— 占用就直接 kill =====
 free_port() {
@@ -118,6 +128,7 @@ free_port() {
   ok "端口 $port 已释放"
 }
 free_port backend  "$BACKEND_PORT"
+free_port journal  3022
 free_port frontend "$FRONTEND_PORT"
 
 # ===== 3. 依赖安装 =====
@@ -143,6 +154,8 @@ fi
 PIDS=()
 
 cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
   echo
   info "关闭服务..."
   for pid in "${PIDS[@]:-}"; do
@@ -153,9 +166,9 @@ cleanup() {
   # 等子进程退出,避免孤儿
   wait 2>/dev/null || true
   ok "已退出"
-  exit 0
+  exit "$status"
 }
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM
 
 # 用 awk 加前缀(macOS sed 没有 -u line-buffered,改用 awk + fflush 兼容)
 prefix_awk() {
@@ -167,9 +180,10 @@ echo -e "${BLUE}╭────────────────────�
 echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                        ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  journal   ${YELLOW}http://127.0.0.1:3022${NC}        ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭两端                          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭三个服务                      ${BLUE}│${NC}"
 echo -e "${BLUE}╰──────────────────────────────────────────────╯${NC}"
 echo
 
@@ -182,6 +196,14 @@ echo
   uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
+) &
+PIDS+=("$!")
+
+(
+  cd "$TRADE_JOURNAL_DIR"
+  # 用 exec 保持 $! 为 Node 本身；退出时 cleanup 可直接终止它。
+  export TRADE_JOURNAL_PORT=3022
+  exec node src/index.js > >(prefix_awk "$(printf "${YELLOW}[journal ]${NC} ")") 2>&1
 ) &
 PIDS+=("$!")
 
