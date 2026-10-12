@@ -565,6 +565,7 @@ PORT=3018                      # 服务端口
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 fuyao 为参考实现)                  |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
 | [docs/page-sdk.md](./docs/page-sdk.md)                                                             | 页面包开发指南:产物契约、能力桥 ctx、打包与上传、安全边界           |
+| [docs/project-consensus.md](./docs/project-consensus.md)                                           | 二次开发项目共识、当前扩展边界与跨层检查项                           |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 ---
