@@ -1,290 +1,586 @@
-# 股票记录小应用 API
+# 股票记录小应用 API（设计契约）
 
-本文档约定股票记录小应用的 HTTP JSON 接口,用于记录每日交易、每日复盘,并查询当前持仓与已平仓收益。
+> 状态：拟议、未实现。本文只约定目标 HTTP JSON 契约，不代表当前 FastAPI、Vite 或任何 Node 服务已经提供这些接口。
+>
+> 范围：交易记录、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。
 
-## 通用约定
+本文档用于前端、后端和文档评审对齐。所有字段、错误码和计算口径都应按本契约实现后再对外声明可用。
 
-- 请求和响应均使用 `application/json`。
-- 日期字段使用 `YYYY-MM-DD` 字符串,例如 `2026-10-12`。
-- 股票代码字段使用交易所通用代码字符串,例如 `600519`、`000001`。
-- 价格、成本、盈亏金额默认单位为人民币元。
-- 数量字段 `quantity` 默认单位为股。
-- 收益率字段 `return_rate` 使用小数制,例如 `0.1234` 表示 `12.34%`。
-- 买卖方向字段 `side` 取值为 `buy` 或 `sell`,分别表示买入和卖出。
+## 1. 服务边界
 
-通用错误响应:
+### 1.1 路由与运行形态
+
+- 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。
+- 拟议 Node 服务代码目录为 `backend/trade-journal-node/`，开发态服务 origin 为 `http://127.0.0.1:3022`。
+- 当前项目已有 FastAPI 与 Vite `/api` 代理。拟议集成方式是：浏览器继续请求同源 `/api`；开发态 Vite 继续把 `/api` 代理到 FastAPI；FastAPI 保留现有 API，并仅在启用该小应用时把本文列出的交易记录、复盘和持仓路径转发到 Node 服务。浏览器不直接请求 `3022` 端口。
+- Docker 或生产形态可以用同一反向代理规则暴露 `/api`，但不得让 Node 服务与现有 FastAPI 在浏览器侧形成两个公开 API origin。
+
+### 1.2 认证边界
+
+- 本契约不假设仓库当前已经存在用户认证中间件，也不定义登录、会话或多用户隔离。
+- 若部署层、FastAPI 或反向代理已经启用访问密码、会话或其他认证，应在请求到达本文接口前完成认证。认证失败使用本文错误 envelope 返回 `401` 或 `403`。
+- v1 目标按本地单用户记录本设计，不接受客户端传入 `user_id`、`owner_id` 或类似身份字段。未来若增加多用户，需另行扩展认证与数据隔离契约。
+
+## 2. 通用约定
+
+### 2.1 请求与响应
+
+- 请求体和响应体均使用 `application/json; charset=utf-8`。
+- 成功响应统一为 `{ "data": ... }`。列表响应还包含 `pagination`。
+- 未特别说明时，响应中的可选文本字段使用 `null` 表示缺失，不用空字符串伪装缺失。
+- 所有 ID 都是服务端生成的不透明稳定字符串。客户端不得解析 ID 结构、按 ID 排序或自行生成资源 ID。
+
+### 2.2 股票标识
+
+- 创建和更新交易记录时，客户端提交 `code`，格式为六位 A 股代码字符串，例如 `600519`、`000001`。
+- 服务端必须把 `code` 解析为标准 `symbol`，例如 `600519.SH`、`000001.SZ`，并在响应中同时返回 `code` 和 `symbol`。
+- `code` 只允许 `^[0-9]{6}$`。如客户端额外提交 `symbol`，服务端应忽略它或校验它与 `code` 的解析结果一致；不一致时返回 `422 VALIDATION_ERROR`。
+- 无法解析交易所或资产类型时返回 `422 INVALID_STOCK_CODE`，不得猜测交易所，也不得把无法识别的代码错配到行情。
+- `name` 是显示名称，不参与身份匹配。持仓和收益计算以 `symbol` 为准。
+
+### 2.3 日期、时间与时区
+
+- 日期字段使用 `YYYY-MM-DD`，必须是真实日历日期，例如 `2026-02-29` 无效。
+- 交易记录的 `trade_date` 和复盘的 `date` 按 `Asia/Shanghai` 自然日解释。接口不接受服务器本地时区作为隐式业务时区。
+- `trade_date` 不强制必须是 A 股交易日，因为用户可能补录停牌、盘后或历史更正记录；需要按交易日取行情时，行情源应单独返回价格状态。
+- `as_of` 表示按 `Asia/Shanghai` 日期截止计算持仓，包含 `trade_date <= as_of` 的记录。
+- 时间戳字段使用 ISO 8601 字符串并带时区偏移，例如 `2026-10-12T15:04:05+08:00`。
+- `trade_time` 可选，格式为 `HH:mm:ss`，按 `Asia/Shanghai` 当日墙钟解释；为 `null` 时同日内排序退回到 `created_at` 和 `id`。
+- `holding_days` 是自然日差值：`close_date - open_date`，同日开平为 `0`。本文不把它定义为交易日数量。
+
+### 2.4 数值、单位与精度
+
+| 字段类型 | JSON 类型 | 范围 | 精度与单位 |
+| --- | --- | --- | --- |
+| 价格字段 | number | `> 0` 且 `<= 1000000` | 人民币元，最多 4 位小数 |
+| 金额字段 | number | `>= 0`，盈亏字段可为负 | 人民币元，响应四舍五入到 2 位小数 |
+| 数量字段 | integer | `>= 1` 且 `<= 1000000000` | 股，不支持小数股 |
+| 费税字段 | number | `>= 0` 且 `<= 100000000` | 人民币元，最多 2 位小数 |
+| 收益率字段 | number 或 null | 无固定上下限 | 小数制，响应四舍五入到 6 位小数，`0.123456` 表示 `12.3456%` |
+
+- 服务端内部计算应使用十进制定点数，不用二进制浮点作为持久化口径。
+- `fee` 表示佣金、过户费等交易费用合计；`tax` 表示印花税等税费。缺省均为 `0`。
+- `gross_amount = price * quantity`。
+- 买入现金流成本为 `gross_amount + fee + tax`。卖出净回收金额为 `gross_amount - fee - tax`。
+
+### 2.5 分页、排序与空列表
+
+- 列表接口统一支持 `limit` 和 `offset`。
+- `limit` 默认 `50`，最小 `1`，最大 `200`。超过最大值返回 `422 VALIDATION_ERROR`，不自动截断。
+- `offset` 默认 `0`，必须为 `>= 0` 的整数。
+- 列表响应包含精确 `total` 和 `has_more`。空结果返回空数组、`total: 0`、`has_more: false`，不返回 `404`。
+- 默认排序必须稳定，并在业务字段相同后追加 `created_at desc, id desc` 或等价稳定后缀。
+
+分页对象：
+
+```json
+{
+  "limit": 50,
+  "offset": 0,
+  "total": 1,
+  "has_more": false
+}
+```
+
+### 2.6 错误 envelope
+
+错误响应统一使用：
 
 ```json
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "date 必须是 YYYY-MM-DD 格式"
+    "message": "请求字段校验失败",
+    "details": {
+      "fields": [
+        {
+          "path": "trade_date",
+          "message": "必须是 YYYY-MM-DD 格式"
+        }
+      ]
+    }
   }
 }
 ```
 
-## POST /api/records
+`details` 可省略；如存在字段级错误，`details.fields[].path` 使用请求 JSON path 或查询参数名。
 
-保存一条每日交易记录。
+| HTTP 状态 | 稳定错误码 | 触发场景 |
+| --- | --- | --- |
+| `400` | `BAD_REQUEST` | JSON 语法错误、`Content-Type` 不支持 |
+| `401` | `UNAUTHENTICATED` | 部署层或上游认证要求登录但未登录 |
+| `403` | `FORBIDDEN` | 已认证但无权访问该本地记录本 |
+| `404` | `NOT_FOUND` | 指定 `id` 不存在或已被删除 |
+| `409` | `DUPLICATE_RECORD` | `client_request_id` 与已存在记录冲突 |
+| `409` | `DUPLICATE_REVIEW` | 同一日期已存在每日复盘 |
+| `409` | `INSUFFICIENT_POSITION` | 卖出、修改或删除会导致指定标的持仓为负 |
+| `409` | `CONFLICT` | 资源状态与本次修改冲突但不属于上述专用码 |
+| `422` | `VALIDATION_ERROR` | 字段类型、范围、格式或必填项不满足要求 |
+| `422` | `INVALID_DATE` | 日期存在但不满足本接口语义，例如 `from > to` |
+| `422` | `INVALID_STOCK_CODE` | 股票代码无法规范化为唯一 `symbol` |
+| `500` | `INTERNAL_ERROR` | 未预期服务端错误 |
 
-### 请求字段
+行情不可用不作为持仓列表错误返回；应在价格字段中标记为 `price_status: "unavailable"`。
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `date` | string | 是 | 交易日期,格式为 `YYYY-MM-DD` |
-| `code` | string | 是 | 股票代码 |
-| `name` | string | 是 | 股票名称 |
-| `side` | string | 是 | 买卖方向:`buy` 买入,`sell` 卖出 |
-| `price` | number | 是 | 成交价格 |
-| `quantity` | number | 是 | 成交数量,单位为股 |
-| `note` | string | 否 | 备注 |
+## 3. 交易记录资源
 
-### 请求示例
+### 3.1 TradeRecord schema
+
+| 字段 | 类型 | 必填 | 可为空 | 说明 |
+| --- | --- | --- | --- | --- |
+| `id` | string | 响应必有 | 否 | 稳定记录 ID，例如 `rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C` |
+| `trade_date` | string | 是 | 否 | 交易日期，`YYYY-MM-DD` |
+| `trade_time` | string | 否 | 是 | 成交时间，`HH:mm:ss`；未知时为 `null` |
+| `code` | string | 是 | 否 | 六位代码 |
+| `symbol` | string | 响应必有 | 否 | 服务端规范化后的标准标的 |
+| `name` | string | 是 | 否 | 显示名称，1 到 64 个字符 |
+| `side` | string | 是 | 否 | `buy` 或 `sell` |
+| `price` | number | 是 | 否 | 成交价格 |
+| `quantity` | integer | 是 | 否 | 成交数量，单位为股 |
+| `fee` | number | 否 | 否 | 交易费用，默认 `0` |
+| `tax` | number | 否 | 否 | 税费，默认 `0` |
+| `note` | string | 否 | 是 | 备注，最长 1000 个字符 |
+| `client_request_id` | string | 否 | 是 | 客户端防重复提交键，最长 80 个字符 |
+| `created_at` | string | 响应必有 | 否 | 创建时间戳 |
+| `updated_at` | string | 响应必有 | 否 | 最近更新时间戳 |
+
+### 3.2 创建记录：POST /api/records
+
+创建一条交易记录。成功创建返回 `201`。
+
+请求字段同 `TradeRecord` 中客户端可写字段：`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
+
+重复提交语义：
+
+- `client_request_id` 缺失时，经济字段完全相同的多笔记录仍允许创建，因为用户可能拆单成交。
+- `client_request_id` 已存在且规范化请求体完全一致时，返回 `200` 和已存在记录，并在 `meta.duplicate` 标记为 `true`。
+- `client_request_id` 已存在但请求体不同，返回 `409 DUPLICATE_RECORD`。
+- 创建卖出记录会按第 6 节口径预演持仓；若导致负持仓，返回 `409 INSUFFICIENT_POSITION`。
+
+请求示例：
 
 ```json
 {
-  "date": "2026-10-12",
+  "trade_date": "2026-10-12",
+  "trade_time": "10:35:12",
   "code": "600519",
   "name": "贵州茅台",
   "side": "buy",
   "price": 1688.5,
   "quantity": 100,
-  "note": "突破前高后小仓位试单"
+  "fee": 5,
+  "tax": 0,
+  "note": "突破前高后小仓位试单",
+  "client_request_id": "web-20261012-0001"
 }
 ```
 
-### 响应示例
+响应示例：
 
 ```json
 {
   "data": {
-    "date": "2026-10-12",
+    "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
+    "trade_date": "2026-10-12",
+    "trade_time": "10:35:12",
     "code": "600519",
+    "symbol": "600519.SH",
     "name": "贵州茅台",
     "side": "buy",
     "price": 1688.5,
     "quantity": 100,
-    "note": "突破前高后小仓位试单"
+    "fee": 5,
+    "tax": 0,
+    "note": "突破前高后小仓位试单",
+    "client_request_id": "web-20261012-0001",
+    "created_at": "2026-10-12T10:35:30+08:00",
+    "updated_at": "2026-10-12T10:35:30+08:00"
   }
 }
 ```
 
-## GET /api/records
+### 3.3 查询记录列表：GET /api/records
 
-按日期查询交易记录。
+查询交易记录列表。
 
-### 查询参数
+查询参数：
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `date` | string | 是 | 交易日期,格式为 `YYYY-MM-DD` |
+| `date` | string | 否 | 等于某个 `trade_date` |
+| `from` | string | 否 | 起始 `trade_date`，包含 |
+| `to` | string | 否 | 结束 `trade_date`，包含 |
+| `code` | string | 否 | 六位代码过滤 |
+| `side` | string | 否 | `buy` 或 `sell` |
+| `limit` | integer | 否 | 默认 `50`，最大 `200` |
+| `offset` | integer | 否 | 默认 `0` |
+| `sort` | string | 否 | `trade_date_desc` 或 `trade_date_asc`，默认 `trade_date_desc` |
 
-### 请求示例
+排序规则：
 
-```http
-GET /api/records?date=2026-10-12
-```
+- `trade_date_desc`：`trade_date desc, trade_time desc nulls last, created_at desc, id desc`。
+- `trade_date_asc`：`trade_date asc, trade_time asc nulls last, created_at asc, id asc`。
 
-### 响应字段
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `date` | string | 交易日期 |
-| `records` | array | 当日交易记录列表 |
-| `records[].code` | string | 股票代码 |
-| `records[].name` | string | 股票名称 |
-| `records[].side` | string | 买卖方向:`buy` 或 `sell` |
-| `records[].price` | number | 成交价格 |
-| `records[].quantity` | number | 成交数量,单位为股 |
-| `records[].note` | string | 备注 |
-
-### 响应示例
+响应示例：
 
 ```json
 {
   "data": {
-    "date": "2026-10-12",
     "records": [
       {
+        "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
+        "trade_date": "2026-10-12",
+        "trade_time": "10:35:12",
         "code": "600519",
+        "symbol": "600519.SH",
         "name": "贵州茅台",
         "side": "buy",
         "price": 1688.5,
         "quantity": 100,
-        "note": "突破前高后小仓位试单"
-      },
-      {
-        "code": "000001",
-        "name": "平安银行",
-        "side": "sell",
-        "price": 11.26,
-        "quantity": 1000,
-        "note": "止盈减仓"
+        "fee": 5,
+        "tax": 0,
+        "note": "突破前高后小仓位试单",
+        "client_request_id": "web-20261012-0001",
+        "created_at": "2026-10-12T10:35:30+08:00",
+        "updated_at": "2026-10-12T10:35:30+08:00"
       }
-    ]
+    ],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 1,
+      "has_more": false
+    }
   }
 }
 ```
 
-## POST /api/reviews
+### 3.4 查询单条记录：GET /api/records/{id}
 
-保存一条每日复盘。
+按稳定 ID 查询交易记录。不存在时返回 `404 NOT_FOUND`。
 
-### 请求字段
+### 3.5 修改记录：PATCH /api/records/{id}
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `date` | string | 是 | 复盘日期,格式为 `YYYY-MM-DD` |
-| `content` | string | 是 | 复盘正文 |
-| `tags` | string[] | 否 | 标签列表 |
+部分更新一条交易记录。至少提交一个可写字段。`id`、`symbol`、`created_at`、`updated_at` 不可由客户端修改。
 
-### 请求示例
+可写字段：`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
+
+修改会重新计算该标的全量持仓路径；若修改后任一时点出现负持仓，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。
+
+请求示例：
+
+```json
+{
+  "price": 1686.2,
+  "note": "修正成交均价"
+}
+```
+
+成功响应返回更新后的完整 `TradeRecord`。
+
+### 3.6 删除记录：DELETE /api/records/{id}
+
+删除一条交易记录。成功返回 `204` 且无响应体。
+
+删除会预演该标的剩余记录的持仓路径；如果删除一笔买入会导致后续卖出无可匹配持仓，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。客户端应先删除或修改依赖该买入的卖出记录。
+
+## 4. 每日复盘资源
+
+### 4.1 DailyReview schema
+
+| 字段 | 类型 | 必填 | 可为空 | 说明 |
+| --- | --- | --- | --- | --- |
+| `id` | string | 响应必有 | 否 | 稳定复盘 ID，例如 `rev_01HZY9QX6M5X7ER2DK2H9K6B8V` |
+| `date` | string | 是 | 否 | 复盘日期，`YYYY-MM-DD` |
+| `content` | string | 是 | 否 | 复盘正文，1 到 20000 个字符 |
+| `tags` | string[] | 否 | 否 | 标签列表，默认 `[]`；每个标签 1 到 30 个字符，最多 20 个 |
+| `created_at` | string | 响应必有 | 否 | 创建时间戳 |
+| `updated_at` | string | 响应必有 | 否 | 最近更新时间戳 |
+
+同一 `date` 只允许一条每日复盘。需要修改正文时使用 `PATCH /api/reviews/{id}`。
+
+### 4.2 创建复盘：POST /api/reviews
+
+成功创建返回 `201`。同一日期已存在复盘时返回 `409 DUPLICATE_REVIEW`。
+
+请求示例：
 
 ```json
 {
   "date": "2026-10-12",
-  "content": "指数缩量震荡,高位题材分歧加大。明日重点观察成交量能否恢复,以及金融、消费方向是否继续承接资金。",
+  "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
   "tags": ["缩量", "题材分歧", "等待确认"]
 }
 ```
 
-### 响应示例
+响应示例：
 
 ```json
 {
   "data": {
+    "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8V",
     "date": "2026-10-12",
-    "content": "指数缩量震荡,高位题材分歧加大。明日重点观察成交量能否恢复,以及金融、消费方向是否继续承接资金。",
-    "tags": ["缩量", "题材分歧", "等待确认"]
+    "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
+    "tags": ["缩量", "题材分歧", "等待确认"],
+    "created_at": "2026-10-12T20:20:00+08:00",
+    "updated_at": "2026-10-12T20:20:00+08:00"
   }
 }
 ```
 
-## GET /api/reviews
+### 4.3 查询复盘列表：GET /api/reviews
 
-查询每日复盘列表。传入 `date` 时返回指定日期复盘;不传时返回全部复盘,按日期倒序排列。
-
-### 查询参数
+查询参数：
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `date` | string | 否 | 复盘日期,格式为 `YYYY-MM-DD` |
+| `date` | string | 否 | 等于某个复盘日期 |
+| `from` | string | 否 | 起始日期，包含 |
+| `to` | string | 否 | 结束日期，包含 |
+| `tag` | string | 否 | 按单个标签过滤 |
+| `limit` | integer | 否 | 默认 `50`，最大 `200` |
+| `offset` | integer | 否 | 默认 `0` |
+| `sort` | string | 否 | `date_desc` 或 `date_asc`，默认 `date_desc` |
 
-### 请求示例
+默认排序为 `date desc, created_at desc, id desc`。
 
-```http
-GET /api/reviews?date=2026-10-12
-```
-
-### 响应字段
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `reviews` | array | 复盘列表 |
-| `reviews[].date` | string | 复盘日期 |
-| `reviews[].content` | string | 复盘正文 |
-| `reviews[].tags` | string[] | 标签列表 |
-
-### 响应示例
+响应示例：
 
 ```json
 {
   "data": {
     "reviews": [
       {
+        "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8V",
         "date": "2026-10-12",
-        "content": "指数缩量震荡,高位题材分歧加大。明日重点观察成交量能否恢复,以及金融、消费方向是否继续承接资金。",
-        "tags": ["缩量", "题材分歧", "等待确认"]
+        "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
+        "tags": ["缩量", "题材分歧", "等待确认"],
+        "created_at": "2026-10-12T20:20:00+08:00",
+        "updated_at": "2026-10-12T20:20:00+08:00"
       }
-    ]
+    ],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 1,
+      "has_more": false
+    }
   }
 }
 ```
 
-## GET /api/positions/current
+### 4.4 查询、修改和删除单条复盘
 
-返回当前持仓。当前持仓由交易记录汇总得到,未完全卖出的标的会出现在本接口中。
+- `GET /api/reviews/{id}`：按 ID 查询复盘，不存在时返回 `404 NOT_FOUND`。
+- `PATCH /api/reviews/{id}`：可修改 `date`、`content`、`tags`。若新 `date` 与另一条复盘冲突，返回 `409 DUPLICATE_REVIEW`。
+- `DELETE /api/reviews/{id}`：删除复盘。成功返回 `204` 且无响应体。
 
-### 响应字段
+## 5. 行情价格字段
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `positions` | array | 当前持仓列表 |
-| `positions[].code` | string | 股票代码 |
-| `positions[].name` | string | 股票名称 |
-| `positions[].quantity` | number | 当前持仓数量,单位为股 |
-| `positions[].cost` | number | 持仓成本价 |
-| `positions[].current_price` | number | 当前价格 |
-| `positions[].cost_amount` | number | 持仓成本金额 |
-| `positions[].market_value` | number | 当前市值 |
-| `positions[].unrealized_pnl` | number | 浮动盈亏金额 |
-| `positions[].return_rate` | number | 收益率,小数制 |
+持仓接口可能需要行情价格，但本契约不声称实时行情一定可用。
 
-### 响应示例
+| 字段 | 类型 | 可为空 | 说明 |
+| --- | --- | --- | --- |
+| `current_price` | number | 是 | 用于估算当前市值的最近价格；不可用时为 `null` |
+| `price_source` | string | 是 | 行情来源标识，例如 `tickflow`、`fuyao`、`local_daily`；不可用时为 `null` |
+| `price_as_of` | string | 是 | 价格对应时间戳，ISO 8601；不可用时为 `null` |
+| `price_status` | string | 否 | `fresh`、`stale` 或 `unavailable` |
+
+语义：
+
+- `fresh`：价格来源声明覆盖 `as_of` 对应交易时点，或是该日期已收盘日线价格。
+- `stale`：返回了最近一次可得价格，但 `price_as_of` 早于 `as_of` 对应的最近可用交易日。可用它计算展示值，但前端必须显示过期状态。
+- `unavailable`：没有可用价格。此时 `current_price`、`price_source`、`price_as_of`、`market_value`、`unrealized_pnl` 和未实现 `return_rate` 均为 `null`。
+
+## 6. 持仓与收益计算口径
+
+### 6.1 成交匹配
+
+- 持仓按 `symbol` 独立计算。
+- 记录排序为 `trade_date asc, trade_time asc nulls last, created_at asc, id asc`。
+- 卖出按 FIFO 消耗最早未卖出的买入 lot。
+- 不支持做空。任一卖出数量超过此前未卖出数量时，创建、修改或删除操作返回 `409 INSUFFICIENT_POSITION`。
+- 一笔卖出可以消耗多个买入 lot；历史收益列表按卖出记录聚合为一行。
+
+### 6.2 成本、盈亏和收益率
+
+定义：
+
+- 买入 lot 初始成本金额：`buy_price * buy_quantity + buy_fee + buy_tax`。
+- 部分卖出消耗成本：`lot_remaining_cost_amount * matched_quantity / lot_remaining_quantity`。
+- 卖出净回收金额：`sell_price * sell_quantity - sell_fee - sell_tax`。如果一笔卖出消耗多个 lot，卖出费税按每个 matched quantity 占该卖出总数量的比例分摊。
+- 已实现盈亏：`allocated_sell_net_amount - consumed_cost_amount`。
+- 已实现收益率：`realized_pnl / consumed_cost_amount`。当 `consumed_cost_amount` 为 `0` 时返回 `null`；正常买入成本不应为 `0`。
+- 当前持仓成本金额：所有未卖出 lot 的剩余成本金额之和。
+- 当前持仓成本价：`cost_amount / quantity`。当 `quantity` 为 `0` 时该标的不出现在当前持仓。
+- 当前市值：`current_price * quantity`。`current_price` 为 `null` 时返回 `null`。
+- 未实现盈亏：`market_value - cost_amount`。`market_value` 为 `null` 时返回 `null`。
+- 未实现收益率：`unrealized_pnl / cost_amount`。`cost_amount` 为 `0` 或价格不可用时返回 `null`。
+
+当前持仓和历史收益必须使用同一套 FIFO、费税、分摊和舍入口径。
+
+## 7. 持仓接口
+
+### 7.1 当前持仓：GET /api/positions/current
+
+返回 `as_of` 截止的未平仓持仓。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `as_of` | string | 否 | 截止日期，默认请求发生时的 `Asia/Shanghai` 日期 |
+| `code` | string | 否 | 六位代码过滤 |
+| `limit` | integer | 否 | 默认 `50`，最大 `200` |
+| `offset` | integer | 否 | 默认 `0` |
+| `sort` | string | 否 | `symbol_asc`、`market_value_desc`、`return_rate_desc`，默认 `symbol_asc` |
+
+响应字段：
+
+| 字段 | 类型 | 可为空 | 说明 |
+| --- | --- | --- | --- |
+| `position_key` | string | 否 | 当前持仓稳定键，等于 `symbol` |
+| `code` | string | 否 | 六位代码 |
+| `symbol` | string | 否 | 标准标的 |
+| `name` | string | 否 | 最近一笔相关记录的显示名称 |
+| `open_date` | string | 否 | 当前未平仓 lot 中最早买入日期 |
+| `quantity` | integer | 否 | 当前持仓股数 |
+| `cost` | number | 否 | 当前平均成本价 |
+| `cost_amount` | number | 否 | 当前持仓成本金额 |
+| `current_price` | number | 是 | 最近价格 |
+| `price_source` | string | 是 | 行情来源 |
+| `price_as_of` | string | 是 | 价格时间 |
+| `price_status` | string | 否 | `fresh`、`stale` 或 `unavailable` |
+| `market_value` | number | 是 | 当前市值 |
+| `unrealized_pnl` | number | 是 | 未实现盈亏 |
+| `return_rate` | number | 是 | 未实现收益率，小数制 |
+
+响应示例：
 
 ```json
 {
   "data": {
+    "as_of": "2026-10-12",
     "positions": [
       {
+        "position_key": "600519.SH",
         "code": "600519",
+        "symbol": "600519.SH",
         "name": "贵州茅台",
+        "open_date": "2026-10-12",
         "quantity": 100,
-        "cost": 1688.5,
+        "cost": 1688.55,
+        "cost_amount": 168855,
         "current_price": 1712.3,
-        "cost_amount": 168850,
+        "price_source": "local_daily",
+        "price_as_of": "2026-10-12T15:00:00+08:00",
+        "price_status": "fresh",
         "market_value": 171230,
-        "unrealized_pnl": 2380,
-        "return_rate": 0.0141
+        "unrealized_pnl": 2375,
+        "return_rate": 0.014065
       }
-    ]
+    ],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 1,
+      "has_more": false
+    }
   }
 }
 ```
 
-## GET /api/positions/history
+价格不可用示例：
 
-返回已平仓历史持仓收益。已平仓持仓指买入数量已被卖出记录完全抵扣的交易批次或汇总头寸。
+```json
+{
+  "position_key": "600519.SH",
+  "code": "600519",
+  "symbol": "600519.SH",
+  "name": "贵州茅台",
+  "open_date": "2026-10-12",
+  "quantity": 100,
+  "cost": 1688.55,
+  "cost_amount": 168855,
+  "current_price": null,
+  "price_source": null,
+  "price_as_of": null,
+  "price_status": "unavailable",
+  "market_value": null,
+  "unrealized_pnl": null,
+  "return_rate": null
+}
+```
 
-### 响应字段
+### 7.2 历史收益：GET /api/positions/history
 
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `positions` | array | 已平仓历史持仓列表 |
-| `positions[].code` | string | 股票代码 |
-| `positions[].name` | string | 股票名称 |
-| `positions[].open_date` | string | 开仓日期 |
-| `positions[].close_date` | string | 平仓日期 |
-| `positions[].quantity` | number | 平仓数量,单位为股 |
-| `positions[].cost` | number | 持仓成本价 |
-| `positions[].exit_price` | number | 平仓价格 |
-| `positions[].cost_amount` | number | 持仓成本金额 |
-| `positions[].exit_amount` | number | 平仓成交金额 |
-| `positions[].realized_pnl` | number | 已实现盈亏金额 |
-| `positions[].return_rate` | number | 收益率,小数制 |
-| `positions[].holding_days` | number | 持仓自然日天数 |
+返回由卖出记录产生的已实现收益行。部分卖出也会产生历史收益行，即使该标的仍有剩余持仓。
 
-### 响应示例
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `from` | string | 否 | `close_date` 起始日期，包含 |
+| `to` | string | 否 | `close_date` 结束日期，包含 |
+| `code` | string | 否 | 六位代码过滤 |
+| `limit` | integer | 否 | 默认 `50`，最大 `200` |
+| `offset` | integer | 否 | 默认 `0` |
+| `sort` | string | 否 | `close_date_desc` 或 `close_date_asc`，默认 `close_date_desc` |
+
+默认排序为 `close_date desc, sell_record_id desc, match_id desc`。
+
+响应字段：
+
+| 字段 | 类型 | 可为空 | 说明 |
+| --- | --- | --- | --- |
+| `match_id` | string | 否 | 稳定历史收益行 ID，由卖出记录和匹配批次生成 |
+| `sell_record_id` | string | 否 | 产生该收益的卖出记录 ID |
+| `buy_record_ids` | string[] | 否 | 被该卖出消耗的买入记录 ID 列表 |
+| `code` | string | 否 | 六位代码 |
+| `symbol` | string | 否 | 标准标的 |
+| `name` | string | 否 | 卖出记录的显示名称 |
+| `open_date` | string | 否 | 被消耗买入 lot 中最早买入日期 |
+| `close_date` | string | 否 | 卖出记录的 `trade_date` |
+| `quantity` | integer | 否 | 本次卖出匹配数量 |
+| `cost` | number | 否 | 本次消耗平均成本价 |
+| `exit_price` | number | 否 | 卖出成交价 |
+| `cost_amount` | number | 否 | 本次消耗成本金额 |
+| `exit_amount` | number | 否 | 本次卖出净回收金额，已扣除分摊费税 |
+| `realized_pnl` | number | 否 | 已实现盈亏 |
+| `return_rate` | number | 是 | 已实现收益率，小数制 |
+| `holding_days` | integer | 否 | 自然日持有天数 |
+
+响应示例：
 
 ```json
 {
   "data": {
     "positions": [
       {
+        "match_id": "match_rec_01HZZ1H7S4J9T7R5P0A2BV6F9K_0001",
+        "sell_record_id": "rec_01HZZ1H7S4J9T7R5P0A2BV6F9K",
+        "buy_record_ids": ["rec_01HZ8VCY6N4Q6Y7Z4R0ME2P1XA"],
         "code": "000001",
+        "symbol": "000001.SZ",
         "name": "平安银行",
         "open_date": "2026-09-28",
         "close_date": "2026-10-12",
         "quantity": 1000,
-        "cost": 10.8,
+        "cost": 10.805,
         "exit_price": 11.26,
-        "cost_amount": 10800,
-        "exit_amount": 11260,
-        "realized_pnl": 460,
-        "return_rate": 0.0426,
+        "cost_amount": 10805,
+        "exit_amount": 11255,
+        "realized_pnl": 450,
+        "return_rate": 0.041647,
         "holding_days": 14
       }
-    ]
+    ],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 1,
+      "has_more": false
+    }
   }
 }
 ```
