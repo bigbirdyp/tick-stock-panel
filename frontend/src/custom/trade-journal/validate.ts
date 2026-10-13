@@ -267,7 +267,14 @@ export function patchTouchesRecord(body: RecordPatch): boolean {
   return PATCH_KEYS.some(key => Object.prototype.hasOwnProperty.call(body, key))
 }
 
-export function normalizeReviewWrite(body: ReviewWrite): { ok: true; value: { date: string; content: string; tags: string[] } } | { ok: false; issue: RecordIssue } {
+export interface NormalizedReview {
+  trader: string
+  date: string
+  content: string
+  tags: string[]
+}
+
+export function normalizeReviewWrite(body: ReviewWrite): { ok: true; value: NormalizedReview } | { ok: false; issue: RecordIssue } {
   const fields: FieldError[] = []
   pushDate(fields, 'date', body.date ?? '')
   const content = body.content ?? ''
@@ -281,14 +288,22 @@ export function normalizeReviewWrite(body: ReviewWrite): { ok: true; value: { da
       }
     })
   }
+  let trader = ''
+  if (!Object.prototype.hasOwnProperty.call(body, 'trader') || body.trader === undefined) {
+    fields.push({ path: 'trader', message: '必填' })
+  } else {
+    const traderResult = normalizeTrader(body.trader)
+    if (!traderResult.ok) fields.push(...traderResult.issue.fields)
+    else trader = traderResult.value
+  }
   if (fields.length > 0) {
     return { ok: false, issue: { status: 422, code: 'VALIDATION_ERROR', message: '请求字段校验失败', fields } }
   }
-  return { ok: true, value: { date: body.date, content, tags } }
+  return { ok: true, value: { trader, date: body.date, content, tags } }
 }
 
 export function patchTouchesReview(body: ReviewPatch): boolean {
-  return (['date', 'content', 'tags'] as const).some(key => Object.prototype.hasOwnProperty.call(body, key))
+  return (['trader', 'date', 'content', 'tags'] as const).some(key => Object.prototype.hasOwnProperty.call(body, key))
 }
 
 export function validateCodeFilter(code: string | undefined): RecordIssue | null {

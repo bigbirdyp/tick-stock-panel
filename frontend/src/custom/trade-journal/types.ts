@@ -95,6 +95,7 @@ export interface RecordList {
 export interface TraderSummary {
   trader: string
   record_count: number
+  review_count: number
 }
 
 export interface TraderList {
@@ -104,6 +105,7 @@ export interface TraderList {
 export interface DailyReview {
   id: string
   version: number
+  trader: string
   date: string
   content: string
   tags: string[]
@@ -112,6 +114,7 @@ export interface DailyReview {
 }
 
 export interface ReviewWrite {
+  trader: string
   date: string
   content: string
   tags?: string[]
@@ -119,12 +122,14 @@ export interface ReviewWrite {
 
 export interface ReviewPatch {
   expected_version: number
+  trader?: string
   date?: string
   content?: string
   tags?: string[]
 }
 
 export interface ReviewListQuery {
+  trader?: string
   date?: string
   from?: string
   to?: string

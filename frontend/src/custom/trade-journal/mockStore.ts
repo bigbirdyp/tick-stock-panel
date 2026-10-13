@@ -25,6 +25,7 @@ import {
   historySorts,
   normalizeRecordWrite,
   normalizeReviewWrite,
+  normalizeTrader,
   patchTouchesRecord,
   patchTouchesReview,
   positionSorts,
@@ -194,12 +195,20 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
     },
 
     async listTraders() {
-      const counts = new Map<string, number>()
+      const recordCounts = new Map<string, number>()
+      const reviewCounts = new Map<string, number>()
       for (const record of records.values()) {
-        counts.set(record.trader, (counts.get(record.trader) ?? 0) + 1)
+        recordCounts.set(record.trader, (recordCounts.get(record.trader) ?? 0) + 1)
       }
-      const traders = [...counts.entries()]
-        .map(([trader, record_count]) => ({ trader, record_count }))
+      for (const review of reviews.values()) {
+        reviewCounts.set(review.trader, (reviewCounts.get(review.trader) ?? 0) + 1)
+      }
+      const traders = [...new Set([...recordCounts.keys(), ...reviewCounts.keys()])]
+        .map(trader => ({
+          trader,
+          record_count: recordCounts.get(trader) ?? 0,
+          review_count: reviewCounts.get(trader) ?? 0,
+        }))
         .sort((left, right) => (left.trader < right.trader ? -1 : left.trader > right.trader ? 1 : 0))
       const data: TraderList = { traders }
       return ok(data)
@@ -308,7 +317,10 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
         const dateIssue = validateDateRange(query.date, query.date)
         if (dateIssue) fail({ ...dateIssue, code: 'VALIDATION_ERROR', fields: [{ path: 'date', message: '必须是 YYYY-MM-DD 格式' }] })
       }
+      const traderFilter = validateTraderFilter(query.trader)
+      if (traderFilter.issue) fail(traderFilter.issue)
       const filtered = [...reviews.values()].filter(review => {
+        if (traderFilter.trader != null && review.trader !== traderFilter.trader) return false
         if (query.date != null && review.date !== query.date) return false
         if (query.from != null && review.date < query.from) return false
         if (query.to != null && review.date > query.to) return false
@@ -331,13 +343,14 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
     async createReview(body: ReviewWrite) {
       const normalized = normalizeReviewWrite(body)
       if (!normalized.ok) fail(normalized.issue)
-      if ([...reviews.values()].some(review => review.date === normalized.value.date)) {
-        throw new TradeJournalError(409, 'DUPLICATE_REVIEW', '这一天已经有复盘')
+      if ([...reviews.values()].some(review => review.date === normalized.value.date && review.trader === normalized.value.trader)) {
+        throw new TradeJournalError(409, 'DUPLICATE_REVIEW', '该日期下该交易者已有每日复盘')
       }
       const createdAt = shanghaiNowIso()
       const review: DailyReview = {
         id: nextId('rev'),
         version: 1,
+        trader: normalized.value.trader,
         date: normalized.value.date,
         content: normalized.value.content,
         tags: normalized.value.tags,
@@ -352,23 +365,30 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (typeof body.expected_version !== 'number' || !Number.isInteger(body.expected_version)) {
         throw new TradeJournalError(428, 'PRECONDITION_REQUIRED', '修改必须提供 expected_version')
       }
-      const current = reviews.get(id)
-      if (!current) throw new TradeJournalError(404, 'NOT_FOUND', '复盘不存在')
-      if (current.version !== body.expected_version) {
-        throw new TradeJournalError(409, 'VERSION_CONFLICT', '复盘版本已变化，请重新加载后再提交')
-      }
       if (!patchTouchesReview(body)) {
         fail({ status: 422, code: 'VALIDATION_ERROR', message: '请求字段校验失败', fields: [{ path: 'expected_version', message: '至少修改一个字段' }] })
       }
+      const hasTrader = Object.prototype.hasOwnProperty.call(body, 'trader')
+      if (hasTrader) {
+        const traderResult = normalizeTrader((body as { trader?: unknown }).trader)
+        if (!traderResult.ok) fail(traderResult.issue)
+      }
+      const current = reviews.get(id)
+      if (!current) throw new TradeJournalError(404, 'NOT_FOUND', '复盘不存在')
       const merged: ReviewWrite = {
+        trader: hasTrader ? (body as ReviewPatch & { trader: string }).trader : current.trader,
         date: body.date ?? current.date,
         content: body.content ?? current.content,
         tags: body.tags ?? current.tags,
       }
       const normalized = normalizeReviewWrite(merged)
       if (!normalized.ok) fail(normalized.issue)
-      if ([...reviews.values()].some(review => review.id !== id && review.date === normalized.value.date)) {
-        throw new TradeJournalError(409, 'DUPLICATE_REVIEW', '这一天已经有复盘')
+      // 版本不一致优先于 (date, trader) 冲突：即使改完会撞车，也先返回 VERSION_CONFLICT。
+      if (current.version !== body.expected_version) {
+        throw new TradeJournalError(409, 'VERSION_CONFLICT', '复盘版本已变化，请重新加载后再提交')
+      }
+      if ([...reviews.values()].some(review => review.id !== id && review.date === normalized.value.date && review.trader === normalized.value.trader)) {
+        throw new TradeJournalError(409, 'DUPLICATE_REVIEW', '该日期下该交易者已有每日复盘')
       }
       const updated: DailyReview = {
         ...current,
@@ -525,6 +545,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
     reviews.set('rev_01HZY9QX6M5X7ER2DK2H9K6B8V', {
       id: 'rev_01HZY9QX6M5X7ER2DK2H9K6B8V',
       version: 1,
+      trader: '杨鹏',
       date: '2026-10-12',
       content: '指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。',
       tags: ['缩量', '题材分歧', '等待确认'],
