@@ -392,11 +392,17 @@
 - 若 `trader` 和/或 `symbol` 变化：先从旧账本移除该记录的效果，再纳入新账本，并对旧、新账本分别做 FIFO/no-short 全量校验。任一账本失败 → `409 INSUFFICIENT_POSITION`，整笔不提交。
 - **`client_request_id` / `requests` 键迁移（全局唯一性与 422/409 行为不变）**：
   - **键不变**（未提交该字段，或提交值与当前键相同）：该记录已有的 `requests` 条目**保留创建时指纹**；即使本次 PATCH 改了 `price`/`quantity`/`trader`/其他经济字段，也**不得**用当前记录重算或覆盖原指纹。之后重放**原始 POST payload**（含创建时的 `trader`）→ `200` + `duplicate: true`，响应为**当前**记录；其他 payload → `409`。
-  - **键从 A 改为 B**（A、B 均非空且 A ≠ B）：**保留**键 A 及其原始指纹；**追加**键 B，B 的指纹为 PATCH **提交后当前记录快照**的 v2 指纹；两条 `requests` 的 `recordId` 都指向本记录。B 不得与**其他**记录占用的全局键冲突 → 否则 `409 DUPLICATE_RECORD`。之后用 A 的原始 payload 或与 B 指纹匹配的 payload 重放均可 `200` + `duplicate: true`。
-  - **键从空/`null` 改为 B**：追加键 B，指纹为 PATCH 后当前记录快照的 v2 指纹；B 不得与其他记录冲突 → 否则 `409`。
+  - **键从 A 改为 B**（A、B 均非空且 A ≠ B）：
+    - 若全局已存在键 B 且其 `recordId` 指向**本记录**：直接**复用**该已有 `requests` 条目及其**原始指纹**；不得再写入第二条同键条目，也不得用当前快照覆盖该指纹。键 A（若仍指向本记录）及其原始指纹继续保留。之后用 A 的原始 payload 或与已复用 B 条目指纹匹配的 payload 重放均可 `200` + `duplicate: true`。典型场景：A→B→A 循环改键（与当前 `store.js`：同记录已有键则跳过 push 一致）。
+    - 若全局已存在键 B 且其 `recordId` 指向**另一条记录**：`409 DUPLICATE_RECORD`，整笔不提交。
+    - 若全局尚不存在键 B：**保留**键 A 及其原始指纹；**新增**键 B，B 的指纹为 PATCH **提交后当前记录快照**的 v2 指纹；两条 `requests` 的 `recordId` 都指向本记录。之后用 A 的原始 payload 或与 B 指纹匹配的 payload 重放均可 `200` + `duplicate: true`。
+  - **键从空/`null` 改为 B**：
+    - 若 B 已绑定本记录：复用其原始指纹（不覆盖、不重复写入）。
+    - 若 B 绑定其他记录：`409 DUPLICATE_RECORD`。
+    - 若 B 不存在：新增键 B，指纹为 PATCH 后当前记录快照的 v2 指纹。
   - **键改为 `null`**：删除该 `recordId` 下**全部** `requests` 条目（释放曾绑定到该记录的所有键，含历史 A/B）。
   - `client_request_id` 字段本身若出现在请求体中，须通过既有类型/长度校验（最长 80）；非法 → `422 VALIDATION_ERROR`。
-- 成功后返回更新后的完整 `TradeRecord`，`version` 递增；`updated_at` 更新。记录上的 `client_request_id` 字段反映最近一次写入的键（或 `null`）；`requests` 可因 A→B 而保留多条历史键。
+- 成功后返回更新后的完整 `TradeRecord`，`version` 递增；`updated_at` 更新。记录上的 `client_request_id` 字段反映最近一次写入的键（或 `null`）；`requests` 可因首次改到新键而保留多条历史键，也可因改回已绑定本记录的旧键而复用既有条目。
 
 请求示例（修正价格）：
 
@@ -472,7 +478,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `traders[].trader` | string | 标签字面量（已 trim） |
 | `traders[].record_count` | integer | 该标签下未删除的交易记录条数，`>= 1` |
 
-稳定顺序：按 `trader` 标签字符串做升序排序；比较口径为 UTF-16 code unit 字典序（与 JavaScript 默认字符串 `<` / `localeCompare` 未指定 locale 时的 code-unit 顺序一致），全程同一口径，相同标签只出现一次。
+稳定顺序：按 `trader` 标签字符串做升序排序。比较口径为 JavaScript 字符串的**原始 UTF-16 code unit 序**：对标签数组使用默认 `.sort()`（无 compareFunction），或等价比较器 `a < b` / `a > b`。**不得**使用 `String.prototype.localeCompare`（即使不传 locale 也不等价于 code-unit 序，例如 `'a'` 与 `'Z'`）。全程同一口径，相同标签只出现一次。持仓等列表中作为排序键的字符串字段（如 §7.1 的 `symbol` / `trader` / `position_key`）采用同一 code-unit 升序规则。
 
 空结果（无任何交易记录）：
 
@@ -666,6 +672,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 - `symbol_asc`：`symbol asc, trader asc, position_key asc`。
 - `market_value_desc`：`market_value desc nulls last, symbol asc, trader asc, position_key asc`。
 - `return_rate_desc`：`return_rate desc nulls last, symbol asc, trader asc, position_key asc`。
+- 上述字符串键（`symbol`、`trader`、`position_key`）的升序比较口径与 §3.7 相同：JavaScript 默认 `.sort()` 或原始 UTF-16 code-unit `<`/`>`，**不用** `localeCompare`。
 
 响应字段：
 
@@ -872,18 +879,20 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 3. `reviews` 数组原样保留（含全部 `id`/版本/内容/时间戳）。
 4. `requests`（指纹升级，键不变）：
    - **保留**每条的 `key` 与 `recordId`（旧键字面量完全不动：不改名、不加 trader 前缀、不改写成 §9 的 `seed2:` 形式）。
-   - 解析已存储的 `fingerprint`：若 JSON 解析后为**长度为 12** 的数组（v1），则取该 `recordId` 对应记录在本迁移步骤中确定的 `trader`（对缺省记录即为 `未指定`），将其 **prepend 为元素 0**，得到 13 元 v2 数组后再 `JSON.stringify` 写回。**不得**用当前记录的 `price`/`quantity`/其他经济字段重算这十二个元素——它们必须来自已存储的 v1 指纹本身（即创建时 payload），以便即便该记录后来被 PATCH 改过价/量/`trader`，重放「原始 POST 经济字段 + `trader: "未指定"`」仍命中 `200` + `duplicate: true`，响应为当前记录。
+   - 解析已存储的 `fingerprint`：若 JSON 解析后为**长度为 12** 的数组（v1），则取该 `recordId` 对应记录在本迁移步骤中确定的 `trader`——对缺省/非法而被回填的记录为 `未指定`，对迁移前已具备合法标签的记录为**该既有标签**（例如 `杨鹏`）——将其 **prepend 为元素 0**，得到 13 元 v2 数组后再 `JSON.stringify` 写回。**不得**用当前记录的 `price`/`quantity`/其他经济字段重算这十二个元素——它们必须来自已存储的 v1 指纹本身（即创建时 payload）。幂等重放 POST 必须使用**同一前置标签**（与指纹元素 0 一致）加上原始十二个经济字段，才能命中 `200` + `duplicate: true`（响应为当前记录）。之后对该记录的 PATCH（含改 `trader`）**不得**回写或改写该创建指纹中的标签。
    - 若解析后已是**长度为 13** 的数组（已是 v2），**不再变换**。
-   - 找不到对应记录的孤儿 `requests` 条目删除；无法解析为数组或长度既非 12 也非 13 的指纹视为损坏，删除该条目（不得半写）。
+   - **孤儿**（`recordId` 在 `records` 中无对应行）：可按既有硬删除语义删除该 `requests` 条目并释放键。
+   - **损坏但指向活记录**：若 `recordId` 仍指向一条现存记录，但 `fingerprint` 无法解析为长度为 12 或 13 的数组，则**不得**删除该映射；在同一次原子迁移中原样保留其 `key`、`recordId` 与原始 `fingerprint` 字符串不变。之后任何 POST 复用该键都必须返回 `409 DUPLICATE_RECORD`，不得再创建另一笔交易。
+   - 不得半写：要么整次迁移原子成功并可见，要么对外不暴露中间态。
 5. 将 `schema_version` 设为 `2`。
 6. 原子写回磁盘。若写失败，内存不得对外服务半迁移状态；下次加载重试同一确定性步骤。
 
-迁移不重新分配记录 ID，不递增 `version`，不改变复盘与时间戳，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止——迁移后所有旧记录落入 `未指定` 账本，彼此仍按 FIFO 匹配，与迁移前“全体记录共一 symbol 账本”的数值结果一致。
+迁移不重新分配记录 ID，不递增 `version`，不改变复盘与时间戳，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止。仅**缺失或非法** `trader` 的行被回填为 `未指定` 并落入该标签的账本；迁移前已具备合法标签的行保留各自的 `(trader, symbol)` FIFO 账本、记录字段、持仓/历史过滤与幂等重放标签。若旧 v1 状态中**没有任何**行带有合法 `trader`，则全部行成为 `未指定`，此时原全局 FIFO 数值结果保持不变。
 
 ### 8.3 迁移后的客户端行为
 
 - 新建记录必须显式传 `trader`；不能省略以期望得到 `未指定`。
-- 若需继续向迁移记录追加买卖，应使用 `trader: "未指定"`，或先 `PATCH` 改标签并接受旧/新账本重校验。
+- 若需继续向被回填为 `未指定` 的迁移记录追加买卖，应使用 `trader: "未指定"`；对迁移前已保留合法标签的记录，继续使用该标签。也可先 `PATCH` 改标签并接受旧/新账本重校验。
 - `client_request_id` 仍为全局唯一、最长 80；跨 `trader` 复用同一请求 ID 会 `409`。历史键字面量在迁移中保持不变（见上）；新的跨 trader 导入键见 §9。
 
 ## 9. seed-picks 导入器契约（客户端约定）
