@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { journalPort } from '../src/config.js';
+import { sortPositions } from '../src/positions.js';
 import { createApp } from '../src/server.js';
 import { JournalStore } from '../src/store.js';
 import { recordInput } from '../src/validation.js';
@@ -30,7 +31,12 @@ async function harness(t) {
       body: options.raw ?? (body === undefined ? undefined : JSON.stringify(body)),
     });
     const raw = await response.text();
-    return { status: response.status, body: raw ? JSON.parse(raw) : null, raw };
+    return {
+      status: response.status,
+      body: raw ? JSON.parse(raw) : null,
+      raw,
+      contentType: response.headers.get('content-type'),
+    };
   }
   return { request, store, filePath, directory };
 }
@@ -380,6 +386,8 @@ test('current positions serve the dev query, an empty book, unavailable quotes, 
   const { request } = await harness(t);
   const exact = await request('GET', '/api/positions/current?as_of=2026-10-12&limit=20&offset=0&sort=symbol_asc');
   assert.equal(exact.status, 200);
+  assert.equal(exact.contentType, 'application/json; charset=utf-8');
+  assert.equal(exact.body.error, undefined);
   assert.equal(exact.body.data.as_of, '2026-10-12');
   assert.deepEqual(exact.body.data.positions, []);
   assert.deepEqual(exact.body.data.pagination, { limit: 20, offset: 0, total: 0, has_more: false });
@@ -397,6 +405,11 @@ test('current positions serve the dev query, an empty book, unavailable quotes, 
     assert.deepEqual(positions.map((row) => row.symbol), ['000001.SZ', '600519.SH'], sort);
     assert.deepEqual(response.body.data.pagination, { limit: 20, offset: 0, total: 2, has_more: false });
     for (const row of positions) {
+      assert.equal(row.position_key, row.symbol);
+      assert.equal(row.open_date, '2026-10-10');
+      assert.equal(row.quantity, 100);
+      assert.equal(row.cost_amount, 1005);
+      assert.equal(row.cost, 10.05);
       assert.equal(row.price_status, 'unavailable');
       assert.equal(row.current_price, null);
       assert.equal(row.price_source, null);
@@ -405,7 +418,38 @@ test('current positions serve the dev query, an empty book, unavailable quotes, 
       assert.equal(row.unrealized_pnl, null);
       assert.equal(row.return_rate, null);
     }
+    assert.equal(positions.find((row) => row.code === '000001').name, '平安银行');
+    assert.equal(positions.find((row) => row.code === '600519').name, '贵州茅台');
   }
+});
+
+test('current position sorts place null market value and return rate last', () => {
+  const row = (symbol, positionKey, marketValue, returnRate) => ({
+    symbol, position_key: positionKey, market_value: marketValue, return_rate: returnRate,
+  });
+  const rows = [
+    row('600519.SH', '600519.SH', null, null),
+    row('000001.SZ', '000001.SZ', 1000, 0.01),
+    row('300750.SZ', '300750.SZ', 5000, -0.02),
+    row('601318.SH', '601318.SH', 1000, 0.2),
+    row('000002.SZ', '000002.SZ', null, null),
+    row('601398.SH', '601398.SH', 2000, 0),
+  ];
+  assert.deepEqual(sortPositions(rows, 'symbol_asc').map((item) => item.symbol), [
+    '000001.SZ', '000002.SZ', '300750.SZ', '600519.SH', '601318.SH', '601398.SH',
+  ]);
+  assert.deepEqual(sortPositions(rows, 'market_value_desc').map((item) => item.symbol), [
+    '300750.SZ', '601398.SH', '000001.SZ', '601318.SH', '000002.SZ', '600519.SH',
+  ]);
+  assert.deepEqual(sortPositions(rows, 'return_rate_desc').map((item) => item.symbol), [
+    '601318.SH', '000001.SZ', '601398.SH', '300750.SZ', '000002.SZ', '600519.SH',
+  ]);
+  const tied = [
+    row('600519.SH', 'lot-b', 1000, 0.1),
+    row('600519.SH', 'lot-a', 1000, 0.1),
+  ];
+  assert.deepEqual(sortPositions(tied, 'market_value_desc').map((item) => item.position_key), ['lot-a', 'lot-b']);
+  assert.deepEqual(sortPositions(tied, 'return_rate_desc').map((item) => item.position_key), ['lot-a', 'lot-b']);
 });
 
 test('journal listen port stays on the contract default when ambient PORT is taken', () => {
