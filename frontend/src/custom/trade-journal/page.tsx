@@ -252,6 +252,17 @@ export function TradeJournalPage() {
     setHistoryQuery(query => withTrader(query, undefined))
     setRecordQuery(query => withTrader(query, undefined))
     setReviewQuery(query => withTrader(query, undefined))
+    // 名册里已没有该交易者。replaceState 删掉地址栏里的 trader，不新增历史；tab、其它参数和 hash 保留。
+    if (typeof window === 'undefined') return
+    const history = window.history
+    if (typeof history?.replaceState !== 'function') return
+    const current = new URLSearchParams(readLocationSearch())
+    if (!current.has('trader')) return
+    current.delete('trader')
+    const query = current.toString()
+    const pathname = typeof window.location.pathname === 'string' ? window.location.pathname : ''
+    const hash = typeof window.location.hash === 'string' ? window.location.hash : ''
+    history.replaceState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
   }, [recordQuery.trader, traders.data, traders.isSuccess, traders.isFetching])
 
   const applyCode = (event: React.FormEvent<HTMLFormElement>) => {
