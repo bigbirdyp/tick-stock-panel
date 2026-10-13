@@ -2,7 +2,8 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, notifyManager } from '@tanstack/react-query'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { journal } from './client'
 import { TradeJournalPage } from './page'
 
 vi.mock('./client', async () => {
@@ -15,9 +16,13 @@ actEnvironment.IS_REACT_ACT_ENVIRONMENT = true
 notifyManager.setNotifyFunction(callback => { act(callback) })
 
 let dispose: (() => Promise<void>) | undefined
+beforeEach(() => {
+  window.history.replaceState(null, '', '/')
+})
 afterEach(async () => {
   await dispose?.()
   dispose = undefined
+  window.history.replaceState(null, '', '/')
   notifyManager.setNotifyFunction(callback => callback())
 })
 
@@ -38,11 +43,13 @@ it('渲染持仓和按卖出记录聚合的历史收益，并可切换栏目', a
   await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
   expect(container.textContent).toContain('100')
 
-  const historyTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find(button => button.textContent === '历史收益')
+  const historyTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易日记栏目"] [role="tab"]')).find(button => button.textContent === '历史收益')
   expect(historyTab).toBeDefined()
-  const currentTab = container.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
+  const currentTab = container.querySelector<HTMLButtonElement>('[aria-label="交易日记栏目"] [role="tab"][aria-selected="true"]')
+  expect(currentTab?.textContent).toBe('当前持仓')
   await act(async () => currentTab!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })))
   expect(historyTab?.getAttribute('aria-selected')).toBe('true')
+  expect(container.querySelector('[aria-label="交易者"] [role="tab"][aria-selected="true"]')?.textContent).toContain('全部')
   await vi.waitFor(() => expect(container.textContent).toContain('平安银行'))
   expect(container.textContent).toContain('平安银行')
   expect(container.textContent).toContain('450.00')
@@ -116,7 +123,8 @@ it('交易者页签按全部、A、B 过滤记录和持仓，新建表单沿用�
   }
   const bodyText = () => Array.from(container.querySelectorAll('tbody tr')).map(row => row.textContent ?? '').join('\n')
 
-  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', 'AI选股:atr_pct', '杨鹏']))
+  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', '杨鹏', 'AI选股:atr_pct']))
+  expect(traderButtons().map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())).toEqual(['全部 4', '杨鹏 3', 'AI选股:atr_pct 1'])
   expect(traderButtons()[0]?.getAttribute('aria-selected')).toBe('true')
   await vi.waitFor(() => expect(bodyText()).toContain('贵州茅台'))
   expect(bodyText()).not.toContain('平安银行')
@@ -154,8 +162,11 @@ it('交易者页签按全部、A、B 过滤记录和持仓，新建表单沿用�
   expect(container.querySelectorAll('tbody tr')).toHaveLength(1)
 
   await clickColumn('每日复盘')
-  await vi.waitFor(() => expect(container.textContent).toContain('指数缩量震荡'))
-  expect(traderList()).toBeNull()
+  await vi.waitFor(() => expect(container.textContent).toContain('暂无记录'))
+  expect(container.querySelector('[aria-label="交易日记栏目"] [aria-selected="true"]')?.textContent).toBe('每日复盘')
+  expect(traderList()).not.toBeNull()
+  expect(traderButtons().find(button => traderName(button) === 'AI选股:atr_pct')?.getAttribute('aria-selected')).toBe('true')
+  expect(container.textContent).not.toContain('指数缩量震荡')
 })
 
 it('删除当前交易者最后一条记录后，交易者页签回到全部', async () => {
@@ -191,7 +202,8 @@ it('删除当前交易者最后一条记录后，交易者页签回到全部', a
     await act(async () => button!.click())
   }
 
-  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', 'AI选股:atr_pct', '杨鹏']))
+  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', '杨鹏', 'AI选股:atr_pct']))
+  expect(traderButtons().map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())).toEqual(['全部 4', '杨鹏 3', 'AI选股:atr_pct 1'])
   await clickTrader('AI选股:atr_pct')
   await clickColumn('交易记录')
   await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
@@ -203,6 +215,56 @@ it('删除当前交易者最后一条记录后，交易者页签回到全部', a
   expect(confirmDelete).toBeDefined()
   await act(async () => confirmDelete!.click())
 
-  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', '杨鹏']))
+  await vi.waitFor(() => expect(traderButtons().map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())).toEqual(['全部 3', '杨鹏 3']))
   expect(selectedTraderNames()).toEqual(['全部'])
+})
+
+it('切换交易者时保持当前栏目，选中交易者过滤复盘查询，全部则省略 trader', async () => {
+  notifyManager.setNotifyFunction(callback => { act(callback) })
+  const listReviews = vi.spyOn(journal, 'listReviews')
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  dispose = async () => {
+    listReviews.mockRestore()
+    await act(async () => root.unmount())
+    client.clear()
+    container.remove()
+  }
+
+  const traderButtons = () => Array.from(container.querySelector('[aria-label="交易者"]')?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])
+  const traderName = (button: HTMLButtonElement) => (button.textContent ?? '').replace(/\s+\d+$/, '').trim()
+  const clickTrader = async (label: string) => {
+    const button = traderButtons().find(item => traderName(item) === label)
+    expect(button, label).toBeDefined()
+    await act(async () => button!.click())
+  }
+  const clickColumn = async (label: string) => {
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易日记栏目"] [role="tab"]')).find(item => item.textContent === label)
+    expect(button, label).toBeDefined()
+    await act(async () => button!.click())
+  }
+  const selectedColumn = () => container.querySelector('[aria-label="交易日记栏目"] [role="tab"][aria-selected="true"]')
+  const latestReviewQuery = () => listReviews.mock.calls.at(-1)?.[0]
+
+  await act(async () => {
+    root.render(<QueryClientProvider client={client}><TradeJournalPage /></QueryClientProvider>)
+  })
+
+  await clickColumn('每日复盘')
+  await vi.waitFor(() => expect(latestReviewQuery()).toMatchObject({ limit: 20, offset: 0, sort: 'date_desc' }))
+  expect(latestReviewQuery()).not.toHaveProperty('trader')
+  expect(selectedColumn()?.textContent).toBe('每日复盘')
+
+  await clickTrader('杨鹏')
+  expect(selectedColumn()?.textContent).toBe('每日复盘')
+  await vi.waitFor(() => expect(latestReviewQuery()).toMatchObject({ trader: '杨鹏', offset: 0, sort: 'date_desc' }))
+  await vi.waitFor(() => expect(container.textContent).toContain('指数缩量震荡'))
+
+  await clickTrader('全部')
+  expect(selectedColumn()?.textContent).toBe('每日复盘')
+  await vi.waitFor(() => expect(latestReviewQuery()).toMatchObject({ limit: 20, offset: 0, sort: 'date_desc' }))
+  expect(latestReviewQuery()).not.toHaveProperty('trader')
+  expect(container.textContent).toContain('指数缩量震荡')
 })
