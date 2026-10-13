@@ -25,7 +25,7 @@ function ErrorMessage({ error }: { error: unknown }) {
         </ul>
       )}
       {known && error.code === 'VERSION_CONFLICT' && <p className="mt-1">版本已更新。请关闭表单，刷新列表后重新编辑。</p>}
-      {known && error.code === 'DUPLICATE_REVIEW' && <p className="mt-1">同一日期已有复盘，请编辑已有条目。</p>}
+      {known && error.code === 'DUPLICATE_REVIEW' && <p className="mt-1">该日期下该交易者已有每日复盘，请编辑已有条目。</p>}
       {known && error.code === 'DUPLICATE_RECORD' && <p className="mt-1">请求标识已用于不同内容，请检查后重新提交。</p>}
     </div>
   )
@@ -149,11 +149,14 @@ export function RecordForm({ record, defaultTrader = '', onClose, onSave }: Reco
 
 interface ReviewFormProps {
   review: DailyReview | null
+  /** 当前已选交易者。仅作新建预填；「全部」不预填，必须手填。 */
+  defaultTrader?: string
   onClose: () => void
   onSave: (body: ReviewWrite, original: DailyReview | null) => Promise<ApiSuccess<DailyReview>>
 }
 
-export function ReviewForm({ review, onClose, onSave }: ReviewFormProps) {
+export function ReviewForm({ review, defaultTrader = '', onClose, onSave }: ReviewFormProps) {
+  const [trader, setTrader] = useState(review?.trader ?? defaultTrader)
   const [date, setDate] = useState(review?.date ?? shanghaiToday())
   const [content, setContent] = useState(review?.content ?? '')
   const [tagsText, setTagsText] = useState(review?.tags.join('，') ?? '')
@@ -163,10 +166,15 @@ export function ReviewForm({ review, onClose, onSave }: ReviewFormProps) {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (pending) return
+    const traderResult = normalizeTrader(trader)
+    if (!traderResult.ok) {
+      setError(new TradeJournalError(traderResult.issue.status, traderResult.issue.code, traderResult.issue.message, traderResult.issue.fields))
+      return
+    }
     const tags = tagsText.split(/[,，]/).map(tag => tag.trim()).filter(Boolean)
     setPending(true)
     setError(null)
-    try { await onSave({ date, content, tags }, review) }
+    try { await onSave({ trader: traderResult.value, date, content, tags }, review) }
     catch (reason) { setError(reason) }
     finally { setPending(false) }
   }
@@ -180,6 +188,9 @@ export function ReviewForm({ review, onClose, onSave }: ReviewFormProps) {
           <h2 className="text-base font-semibold">{review ? '编辑每日复盘' : '新增每日复盘'}</h2>
           {review && <span className="text-xs text-muted">版本 {review.version}</span>}
         </div>
+        <label className="block space-y-1 text-xs text-secondary">交易者
+          <input className={inputClass} aria-label="复盘交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" value={trader} onChange={e => { setTrader(e.target.value); setError(null) }} />
+        </label>
         <label className="block space-y-1 text-xs text-secondary">复盘日期
           <input className={inputClass} aria-label="复盘日期" type="date" required value={date} onChange={e => { setDate(e.target.value); setError(null) }} />
         </label>
