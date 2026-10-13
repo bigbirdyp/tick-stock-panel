@@ -208,11 +208,16 @@
 重复提交语义：
 
 - `client_request_id` 缺失时，经济字段完全相同的多笔记录仍允许创建，因为用户可能拆单成交。
-- `client_request_id` 的键空间是**全局**的：同一 `client_request_id` 不能绑定两条不同记录，即使它们的 `trader` 不同。客户端在相同 `symbol` 下为不同 `trader` 重放提交时，必须自行把请求 ID 作用域包含 `trader`（例如前缀），以避免跨标签误碰撞。
-- 规范化请求体指纹**必须包含** `trader`（及 `trade_date`、`trade_time`、`code`、`symbol`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`）。比较前对 `trader` 应用 §2.8 trim。
-- `client_request_id` 已存在且规范化请求体（含 `trader`）完全一致时，返回 `200` 和已存在记录，并返回顶层 `"meta": { "duplicate": true }`。该响应不是新建，不递增 `version`。
-- `client_request_id` 已存在但请求体不同（含 `trader` 不同），返回 `409 DUPLICATE_RECORD`。
-- 迁移前已写入的 `requests` 条目保留原 `key` 与 `recordId`（旧键行为）；迁移步骤会按 §8 把指纹重写为含 `trader` 的新公式，以便客户端用补齐后的 `trader: "未指定"` 重放仍命中 `duplicate: true`。新写入一律使用含 `trader` 的指纹。
+- `client_request_id` 的键空间是**全局**的：同一 `client_request_id` 不能绑定两条不同记录，即使它们的 `trader` 不同。客户端在相同 `symbol` 下为不同 `trader` 重放提交时，必须自行把请求 ID 作用域包含 `trader`（见 §9 的 hashed key），以避免跨标签误碰撞。全局上限仍为 **80** 个字符（UTF-16 code unit / JS `.length`）；不得把全局上限提高到 160。
+- **请求指纹（v1 → v2）**：
+  - **v1**（无 `trader` 时的既有实现，对应 `src/store.js` 当前十二元组）：`JSON.stringify([trade_date, trade_time, code, symbol, name, side, price, quantity, fee, tax, note, client_request_id])`。
+  - **v2**（含 `trader`）：在上述十二个规范化创建字段之前，把 **trim 后的** `trader` 作为**元素 0** 前置，即 `JSON.stringify([trimmedTrader, trade_date, trade_time, code, symbol, name, side, price, quantity, fee, tax, note, client_request_id])`（共 13 个元素）。其余十二个元素的规范化口径与 v1 完全相同。
+  - 指纹记录的是**创建当时**写入 `requests` 的 payload，**不是**记录被 PATCH 后的当前字段快照。
+- 幂等命中规则：
+  - 对某个已存在的 `client_request_id`，计算本次 POST 的 v2 指纹；若与该键绑定的**原始指纹**完全一致，返回 `200` 与该键绑定记录的**当前**完整 `TradeRecord`（可能已被 PATCH 改过价/量/`trader` 等），并返回顶层 `"meta": { "duplicate": true }`。该响应不是新建，不递增 `version`。
+  - 同一键下提交与原始指纹不一致的任何 payload（含不同 `trader`、价格、数量等）→ `409 DUPLICATE_RECORD`。
+  - **不得**在 PATCH 改价/改量/`trader` 之后，把“重放原始 POST”误写成 `409`；只要键未换且指纹仍是创建时写入的那份，重放**原始创建 payload**（含当时的 `trader`）必须继续 `200` + `duplicate: true`，响应体为当前记录。
+- 迁移前已写入的 `requests` 条目保留原 `key` 与 `recordId`（旧键字面量不变、不按 trader 改名）；§8 只把 v1 十二元组指纹升级为 v2（前置迁移后的 `trader`），不重算经济字段。新写入一律使用 v2 指纹。
 - 创建卖出记录会在同一事务内按第 6 节口径、仅在该记录的 `(trader, symbol)` 账本上预演持仓；若导致负持仓，返回 `409 INSUFFICIENT_POSITION`。
 
 请求示例：
@@ -385,11 +390,13 @@
 
 - 若仅改经济字段且 `trader`/`symbol` 不变：重放该账本。
 - 若 `trader` 和/或 `symbol` 变化：先从旧账本移除该记录的效果，再纳入新账本，并对旧、新账本分别做 FIFO/no-short 全量校验。任一账本失败 → `409 INSUFFICIENT_POSITION`，整笔不提交。
-- 若同时修改 `client_request_id`：新键不得与**其他**记录占用的全局键冲突；冲突 → `409 DUPLICATE_RECORD`。若键不变但规范化指纹因字段（含 `trader`）变化而变化，更新该 `requests` 条目的指纹，键与 `recordId` 保持不变。
-- 若把 `client_request_id` 从有值改为 `null`：删除该记录对应的 `requests` 条目。
-- 成功后返回更新后的完整 `TradeRecord`，`version` 递增；`updated_at` 更新。
-
-对已用 `client_request_id` 创建的记录做 PATCH 后：后续用**旧**规范化体重放 `POST` 会因指纹不再匹配而得到 `409 DUPLICATE_RECORD`（键仍被占用）；要用当前体才能再次得到 `200` + `duplicate: true`。这与改价/改量后的既有幂等语义一致，现扩展到 `trader` 变更。
+- **`client_request_id` / `requests` 键迁移（全局唯一性与 422/409 行为不变）**：
+  - **键不变**（未提交该字段，或提交值与当前键相同）：该记录已有的 `requests` 条目**保留创建时指纹**；即使本次 PATCH 改了 `price`/`quantity`/`trader`/其他经济字段，也**不得**用当前记录重算或覆盖原指纹。之后重放**原始 POST payload**（含创建时的 `trader`）→ `200` + `duplicate: true`，响应为**当前**记录；其他 payload → `409`。
+  - **键从 A 改为 B**（A、B 均非空且 A ≠ B）：**保留**键 A 及其原始指纹；**追加**键 B，B 的指纹为 PATCH **提交后当前记录快照**的 v2 指纹；两条 `requests` 的 `recordId` 都指向本记录。B 不得与**其他**记录占用的全局键冲突 → 否则 `409 DUPLICATE_RECORD`。之后用 A 的原始 payload 或与 B 指纹匹配的 payload 重放均可 `200` + `duplicate: true`。
+  - **键从空/`null` 改为 B**：追加键 B，指纹为 PATCH 后当前记录快照的 v2 指纹；B 不得与其他记录冲突 → 否则 `409`。
+  - **键改为 `null`**：删除该 `recordId` 下**全部** `requests` 条目（释放曾绑定到该记录的所有键，含历史 A/B）。
+  - `client_request_id` 字段本身若出现在请求体中，须通过既有类型/长度校验（最长 80）；非法 → `422 VALIDATION_ERROR`。
+- 成功后返回更新后的完整 `TradeRecord`，`version` 递增；`updated_at` 更新。记录上的 `client_request_id` 字段反映最近一次写入的键（或 `null`）；`requests` 可因 A→B 而保留多条历史键。
 
 请求示例（修正价格）：
 
@@ -430,9 +437,9 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 - 若该 `trader` 下已无剩余记录，后续 `GET /api/traders` 不再列出该标签。
 - 派生当前持仓与历史收益按剩余记录重算；已删除卖出对应的历史行不再出现。
 
-## 3.7 交易者列表：GET /api/traders
+### 3.7 交易者列表：GET /api/traders
 
-返回当前 `records` 中**实际出现过**的去重 `trader` 标签及其记录条数。本接口**豁免分页**：不接受 `limit`/`offset`/`sort`；传入这些查询参数返回 `422 VALIDATION_ERROR`。无 `meta`。
+返回当前 `records` 中**实际出现过**的去重 `trader` 标签及其记录条数。本接口**豁免分页**：不接受 `limit`/`offset`/`sort` 或任何其他查询参数；传入不支持的查询参数返回 `422 VALIDATION_ERROR`。无 `meta`。
 
 响应 envelope：
 
@@ -465,7 +472,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `traders[].trader` | string | 标签字面量（已 trim） |
 | `traders[].record_count` | integer | 该标签下未删除的交易记录条数，`>= 1` |
 
-稳定顺序：按 `trader` 字符串做升序排序，比较口径为 UTF-16 code unit 字典序（与 JavaScript 默认字符串 `<` 一致），相同标签只出现一次。
+稳定顺序：按 `trader` 标签字符串做升序排序；比较口径为 UTF-16 code unit 字典序（与 JavaScript 默认字符串 `<` / `localeCompare` 未指定 locale 时的 code-unit 顺序一致），全程同一口径，相同标签只出现一次。
 
 空结果（无任何交易记录）：
 
@@ -860,17 +867,58 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 迁移步骤（必须全部在同一次原子写中完成）：
 
-1. 对每条需要修复的记录：设置 `trader` 为字面量 `未指定`（U+672A U+6307 U+5B9A）。**不**修改 `id`、`version`、`created_at`、`updated_at` 或其他业务字段。
+1. 对每条需要修复的记录：设置 `trader` 为字面量 `未指定`（U+672A U+6307 U+5B9A）。**不**修改 `id`、`version`、`created_at`、`updated_at` 或其他业务字段（含已 PATCH 过的价格/数量等）。
 2. 已具备合法非空 `trader` 的记录保持原值。
-3. `reviews` 数组原样保留（含全部 `id`/版本/内容）。
-4. `requests`：保留每条的 `key` 与 `recordId`（旧键行为：键仍为全局 `client_request_id`，不改名、不按 trader 加前缀）。将 `fingerprint` **重写**为含该 `recordId` 对应记录当前 `trader` 的新规范化公式，使迁移后客户端用相同经济字段并显式传 `trader: "未指定"` 的 `POST` 仍可命中 `200` + `duplicate: true`。找不到对应记录的孤儿 `requests` 条目删除。
+3. `reviews` 数组原样保留（含全部 `id`/版本/内容/时间戳）。
+4. `requests`（指纹升级，键不变）：
+   - **保留**每条的 `key` 与 `recordId`（旧键字面量完全不动：不改名、不加 trader 前缀、不改写成 §9 的 `seed2:` 形式）。
+   - 解析已存储的 `fingerprint`：若 JSON 解析后为**长度为 12** 的数组（v1），则取该 `recordId` 对应记录在本迁移步骤中确定的 `trader`（对缺省记录即为 `未指定`），将其 **prepend 为元素 0**，得到 13 元 v2 数组后再 `JSON.stringify` 写回。**不得**用当前记录的 `price`/`quantity`/其他经济字段重算这十二个元素——它们必须来自已存储的 v1 指纹本身（即创建时 payload），以便即便该记录后来被 PATCH 改过价/量/`trader`，重放「原始 POST 经济字段 + `trader: "未指定"`」仍命中 `200` + `duplicate: true`，响应为当前记录。
+   - 若解析后已是**长度为 13** 的数组（已是 v2），**不再变换**。
+   - 找不到对应记录的孤儿 `requests` 条目删除；无法解析为数组或长度既非 12 也非 13 的指纹视为损坏，删除该条目（不得半写）。
 5. 将 `schema_version` 设为 `2`。
 6. 原子写回磁盘。若写失败，内存不得对外服务半迁移状态；下次加载重试同一确定性步骤。
 
-迁移不重新分配记录 ID，不递增 `version`，不改变复盘，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止——迁移后所有旧记录落入 `未指定` 账本，彼此仍按 FIFO 匹配，与迁移前“全体记录共一 symbol 账本”的数值结果一致。
+迁移不重新分配记录 ID，不递增 `version`，不改变复盘与时间戳，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止——迁移后所有旧记录落入 `未指定` 账本，彼此仍按 FIFO 匹配，与迁移前“全体记录共一 symbol 账本”的数值结果一致。
 
 ### 8.3 迁移后的客户端行为
 
 - 新建记录必须显式传 `trader`；不能省略以期望得到 `未指定`。
 - 若需继续向迁移记录追加买卖，应使用 `trader: "未指定"`，或先 `PATCH` 改标签并接受旧/新账本重校验。
-- `client_request_id` 仍为全局唯一；跨 `trader` 复用同一请求 ID 会 `409`。
+- `client_request_id` 仍为全局唯一、最长 80；跨 `trader` 复用同一请求 ID 会 `409`。历史键字面量在迁移中保持不变（见上）；新的跨 trader 导入键见 §9。
+
+## 9. seed-picks 导入器契约（客户端约定）
+
+本节约束 `backend/trade-journal-node/scripts/seed-picks.js`（及等价导入客户端）如何构造 `POST /api/records` 的 `trader` 与 `client_request_id`。服务端仍只执行 §2–§3 的通用校验；**不**把全局 `client_request_id` 上限从 80 提高到 160。
+
+### 9.1 `trader` 默认值与校验
+
+- 若命令行提供显式 `--trader <label>`：以其 trim 后的值作为最终标签（覆盖下列默认）。
+- 否则：
+  - `--from-tsp`：默认 `AI选股:<strategy display name>`，其中 `<strategy display name>` 为策略的展示名（已 trim）。
+  - `--from-file`：默认 `AI选股:文件导入`。
+- 得到最终标签后，必须按 §2.8 做 normalize/validate（trim、非空、长度 1..64），**然后**再 POST。
+- 若前缀 `AI选股:` 与策略名/显式值拼接后超过 64 个 UTF-16 code unit：导入器必须**可见失败**（非零退出/明确错误），**禁止**静默截断。
+
+### 9.2 `client_request_id`（跨 trader、仍 ≤80）
+
+既有「`tradeDate` + `symbol`」键在不同 `trader` 之间会全局碰撞。导入器必须改用下列稳定短键（总长远低于 80）：
+
+```text
+seed2:${tradeDate}:${symbol}:${sha256(UTF8(trimmedTrader)).slice(0, 32)}
+```
+
+其中：
+
+- `tradeDate` 为 `YYYY-MM-DD`（Asia/Shanghai 今天，与写入的 `trade_date` 一致）；
+- `symbol` 为服务端规范标的（如 `600519.SH`）；
+- `trimmedTrader` 为 §9.1 最终标签；`sha256` 对 UTF-8 字节摘要，再取十六进制前 32 个字符（小写）。
+
+行为：
+
+- 同一 `tradeDate` + `symbol` + `trader` 重跑 → 与原始指纹一致 → `200` + `duplicate: true`，不新建。
+- 同一 `tradeDate` + `symbol` 但**另一** `trader` → 不同键 → 可创建独立记录（落在各自 `(trader, symbol)` 账本）。
+- 同一键但价格/备注等与原始指纹不一致 → `409 DUPLICATE_RECORD`。
+
+### 9.3 与迁移的关系
+
+§8 迁移**不改写**已存在的 `requests[].key` 字面量。因此迁移前用旧式 `日期+symbol` 写入的键继续保留；仅指纹按 §8.2 升级为 v2。新导入统一使用 `seed2:...` 键；旧键与新键可并存于全局键空间，互不自动合并。
