@@ -102,7 +102,7 @@ export function TradeJournalPage() {
   const [positionQuery, setPositionQuery] = useState<PositionQuery>(() => withTrader({ as_of: shanghaiToday(), limit: 20, offset: 0, sort: 'symbol_asc' }, view.trader))
   const [historyQuery, setHistoryQuery] = useState<HistoryQuery>(() => withTrader({ limit: 20, offset: 0, sort: 'close_date_desc' }, view.trader))
   const [recordQuery, setRecordQuery] = useState<RecordListQuery>(() => withTrader({ limit: 20, offset: 0, sort: 'trade_date_desc' }, view.trader))
-  const [reviewQuery, setReviewQuery] = useState<ReviewListQuery>({ limit: 20, offset: 0, sort: 'date_desc' })
+  const [reviewQuery, setReviewQuery] = useState<ReviewListQuery>(() => withTrader({ limit: 20, offset: 0, sort: 'date_desc' }, view.trader))
   const [codeInput, setCodeInput] = useState('')
   const [recordEditor, setRecordEditor] = useState<TradeRecord | 'new' | null>(null)
   const [reviewEditor, setReviewEditor] = useState<DailyReview | 'new' | null>(null)
@@ -215,10 +215,11 @@ export function TradeJournalPage() {
     setPositionQuery(query => withTrader(query, trader))
     setHistoryQuery(query => withTrader(query, trader))
     setRecordQuery(query => withTrader(query, trader))
+    setReviewQuery(query => withTrader(query, trader))
     writeTraderSelection(trader, tab)
   }
 
-  // 只消费浏览器后退前进。交易者过滤沿用 withTrader；复盘过滤留给后续阶段。
+  // 只消费浏览器后退前进。四条列表都按地址栏交易者过滤；「全部」则去掉 trader。
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
     const restoreJournalFromHistory = () => {
@@ -232,6 +233,7 @@ export function TradeJournalPage() {
       setPositionQuery(query => applyTrader(query))
       setHistoryQuery(query => applyTrader(query))
       setRecordQuery(query => applyTrader(query))
+      setReviewQuery(query => applyTrader(query))
       const code = next.tab === 'positions' ? sectionCodeRef.current.positions
         : next.tab === 'history' ? sectionCodeRef.current.history
         : next.tab === 'records' ? sectionCodeRef.current.records
@@ -249,6 +251,7 @@ export function TradeJournalPage() {
     setPositionQuery(query => withTrader(query, undefined))
     setHistoryQuery(query => withTrader(query, undefined))
     setRecordQuery(query => withTrader(query, undefined))
+    setReviewQuery(query => withTrader(query, undefined))
   }, [recordQuery.trader, traders.data, traders.isSuccess, traders.isFetching])
 
   const applyCode = (event: React.FormEvent<HTMLFormElement>) => {
@@ -363,7 +366,7 @@ export function TradeJournalPage() {
       </div>
 
       {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={recordEditor === 'new' ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
-      {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
+      {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} defaultTrader={reviewEditor === 'new' ? reviewQuery.trader ?? '' : ''} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
       {deletion && <Modal onClose={() => !deleting && setDeletion(null)} ariaLabel="确认删除" panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface p-5 shadow-xl" closeOnBackdrop={!deleting}>
         <div className="space-y-4">
           <h2 className="text-base font-semibold">确认删除</h2>
