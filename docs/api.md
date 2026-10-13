@@ -1,10 +1,12 @@
 # 股票记录小应用 API（设计契约）
 
-> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。
+> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/traders`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。
 >
-> 范围：交易记录、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。
+> 范围：交易记录、交易者标签统计、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。不新增选股类资源。
 
 本文档约定 HTTP JSON 契约与计算口径。本地 Node/Vite 路径以当前实现为准；生产边界未落地前，不得把本机直连 Node 当作可对外暴露的认证边界。
+
+持久化实现说明（契约口径，非 SQL）：本地 Node 将状态原子写入 JSON 文件 `backend/trade-journal-node/.data/journal.json`。磁盘形态为顶层 `schema_version`、`records`、`reviews`、`requests`。本文定义的 `trader` 字段与 FIFO 分账规则属于该 JSON 状态机的契约；迁移规则见 §8。
 
 ## 1. 服务边界
 
@@ -12,12 +14,13 @@
 
 - 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。浏览器只请求同源 `/api`，不得直接访问 Node 服务 origin。
 - Node 服务代码目录为 `backend/trade-journal-node/`。开发态监听 `http://127.0.0.1:3022`；该地址只作为本机开发代理目标，对浏览器客户端保持私有，不得作为前端 `baseURL` 或公开 API origin。
-- 开发态路由拆分（当前 `frontend/vite.config.ts` 已配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
+- 开发态路由拆分（当前 `frontend/vite.config.ts` 已配置或须同步配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、交易者、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/traders`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
 - 本契约不要求、也不假设 FastAPI（`backend/app/`）增加转发路由。开发联调以 Vite 路径拆分为准；生产或 Docker 仍须在上游边界保持同一同源 `/api` 规则：本文路径落到 Node，其余仍由 FastAPI 处理，且不得让浏览器侧同时出现 Node 与 FastAPI 两个公开 API origin。该生产路由与认证边界尚未在本仓库落地。
 
-### 1.2 认证边界
+### 1.2 认证边界与 trader 标签语义
 
 - 本契约不定义登录、会话或多用户隔离 API。v1 按本地单用户记录本设计，不接受客户端传入 `user_id`、`owner_id` 或类似身份字段。未来若增加多用户，需另行扩展认证与数据隔离契约。
+- `trader` 是账本/核算维度上的**交易者标签**（例如策略名或人名），用于分区 FIFO、过滤记录与持仓统计。它**不是**认证身份，不授予权限，也不构成多用户隔离；服务端不得根据 `trader` 做授权判定。
 - 开发态 Vite 把本文路径直连 Node 时，请求不经过 FastAPI，因此不能继承 FastAPI 现有的访问密码、会话或其他认证中间件。该直连代理只适用于本机开发，不得当作可对外暴露的认证边界。
 - 生产或任何对外暴露形态：必须在反向代理、网关或与 FastAPI 等价的认证边界之后再挂载本文路径；认证失败使用本文错误 envelope 返回 `401` 或 `403`。Node 的 `3022`（或等价内网地址）仍不得对浏览器公开。
 
@@ -29,7 +32,7 @@
 - 成功响应统一使用顶层 `data`，可选使用顶层 `meta`，结构固定为 `{ "data": ..., "meta": { "duplicate": boolean } }`。`meta` 不放在 `data` 内。
 - `meta` 只承载不会改变资源 schema 的响应元信息。当前唯一字段是 `duplicate`；`meta` 省略时客户端必须按 `{ "duplicate": false }` 处理。
 - 新建资源成功返回 `201`，且默认省略 `meta`。使用 `client_request_id` 命中完全相同的幂等重复创建时返回 `200`，并必须返回 `"meta": { "duplicate": true }`。
-- 列表响应的分页信息放在 `data.pagination`，不使用 `meta.pagination`。
+- 列表响应的分页信息放在 `data.pagination`，不使用 `meta.pagination`。豁免分页的接口必须在对应章节显式声明。
 - 未特别说明时，响应中的可选文本字段使用 `null` 表示缺失，不用空字符串伪装缺失。
 - 所有 ID 都是服务端生成的不透明稳定字符串。客户端不得解析 ID 结构、按 ID 排序或自行生成资源 ID。
 
@@ -39,7 +42,8 @@
 {
   "data": {
     "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
-    "version": 1
+    "version": 1,
+    "trader": "AI选股:atr_pct"
   },
   "meta": {
     "duplicate": true
@@ -53,7 +57,7 @@
 - 服务端必须把 `code` 解析为标准 `symbol`，例如 `600519.SH`、`000001.SZ`，并在响应中同时返回 `code` 和 `symbol`。
 - `code` 只允许 `^[0-9]{6}$`。如客户端额外提交 `symbol`，服务端应忽略它或校验它与 `code` 的解析结果一致；不一致时返回 `422 VALIDATION_ERROR`。
 - 无法解析交易所或资产类型时返回 `422 INVALID_STOCK_CODE`，不得猜测交易所，也不得把无法识别的代码错配到行情。
-- `name` 是显示名称，不参与身份匹配。持仓和收益计算以 `symbol` 为准。
+- `name` 是显示名称，不参与身份匹配。持仓和收益计算以 `(trader, symbol)` 为准（见 §6）。
 
 ### 2.3 日期、时间与时区
 
@@ -83,10 +87,10 @@
 
 ### 2.5 分页、排序与空列表
 
-- 列表接口统一支持 `limit` 和 `offset`。
+- 列表接口统一支持 `limit` 和 `offset`，**除非**该接口章节显式声明豁免分页。
 - `limit` 默认 `50`，最小 `1`，最大 `200`。超过最大值返回 `422 VALIDATION_ERROR`，不自动截断。
 - `offset` 默认 `0`，必须为 `>= 0` 的整数。
-- 列表响应包含精确 `total` 和 `has_more`。空结果返回空数组、`total: 0`、`has_more: false`，不返回 `404`。
+- 列表响应包含精确 `total` 和 `has_more`。空结果返回空数组、`total: 0`、`has_more: false`，不返回 `404`。未知但合法的过滤值（例如尚不存在的 `trader` 标签）同样返回空列表，不返回 `404`。
 - 每个列表接口必须在自己的章节列出所有 `sort` 选项的完整排序键。排序键必须确定；业务字段相同后必须追加稳定的时间和 ID 后缀。
 - 对可为空的排序字段，无论升序还是降序，`null` 都排在最后。
 - 对同一份未变化的数据集，相同查询参数必须返回相同顺序；分页页码不能因为未定义排序而漂移。
@@ -114,8 +118,8 @@
     "details": {
       "fields": [
         {
-          "path": "trade_date",
-          "message": "必须是 YYYY-MM-DD 格式"
+          "path": "trader",
+          "message": "必填"
         }
       ]
     }
@@ -133,11 +137,11 @@
 | `404` | `NOT_FOUND` | 指定 `id` 不存在或已被删除 |
 | `409` | `DUPLICATE_RECORD` | `client_request_id` 与已存在记录冲突 |
 | `409` | `DUPLICATE_REVIEW` | 同一日期已存在每日复盘 |
-| `409` | `INSUFFICIENT_POSITION` | 卖出、修改或删除会导致指定标的持仓为负 |
+| `409` | `INSUFFICIENT_POSITION` | 卖出、修改或删除会导致指定 `(trader, symbol)` 账本持仓为负 |
 | `409` | `VERSION_CONFLICT` | `expected_version` 与当前资源版本不一致 |
 | `409` | `CONFLICT` | 资源状态与本次修改冲突但不属于上述专用码 |
 | `428` | `PRECONDITION_REQUIRED` | 修改或删除接口缺少必需的 `expected_version` |
-| `422` | `VALIDATION_ERROR` | 字段类型、范围、格式或必填项不满足要求 |
+| `422` | `VALIDATION_ERROR` | 字段类型、范围、格式或必填项不满足要求（含缺失/空白 `trader`） |
 | `422` | `INVALID_DATE` | 日期存在但不满足本接口语义，例如 `from > to` |
 | `422` | `INVALID_STOCK_CODE` | 股票代码无法规范化为唯一 `symbol` |
 | `500` | `INTERNAL_ERROR` | 未预期服务端错误 |
@@ -149,10 +153,25 @@
 - 可变资源响应必须包含 `version`。`version` 是从 `1` 开始的整数，每次成功修改资源时递增；创建和幂等重复创建不会为同一资源额外递增版本。
 - `PATCH` 请求体必须包含 `expected_version`；`DELETE` 请求必须以查询参数 `expected_version` 传入同名整数。缺失时返回 `428 PRECONDITION_REQUIRED`。
 - 如果资源存在但当前 `version` 与 `expected_version` 不一致，返回 `409 VERSION_CONFLICT`，不得执行本次修改，也不得使用隐式 last-write-wins。
-- 如果资源已被其他请求删除，后续按 ID 修改或删除返回 `404 NOT_FOUND`。
-- 所有影响同一 `symbol` 持仓路径的 `POST /api/records`、`PATCH /api/records/{id}` 和 `DELETE /api/records/{id}` 必须在同一个原子事务或等价的串行化临界区内执行。事务内必须重新规范化代码、检查幂等键、检查版本前置条件、重跑 FIFO/no-short 校验，并在同一提交边界内写入记录和失效或重建派生持仓视图。
-- 当 `PATCH` 会改变 `symbol` 时，事务必须同时覆盖旧 `symbol` 和新 `symbol`；实现可按字典序锁定两个 symbol，避免并发死锁。
+- 如果资源已被其他请求删除，后续按 ID 修改或删除返回 `404 NOT_FOUND`。删除为硬删除：记录从 `records` 移除，关联的 `requests` 条目一并移除；不保留 tombstone 行。删除成功后同一 `id` 永久 `404`；被释放的 `client_request_id` 可被新记录重新使用。
+- 所有影响同一 `(trader, symbol)` 持仓路径的 `POST /api/records`、`PATCH /api/records/{id}` 和 `DELETE /api/records/{id}` 必须在同一个原子事务或等价的串行化临界区内执行。事务内必须重新规范化代码、规范化/校验 `trader`、检查幂等键、检查版本前置条件、重跑该 `(trader, symbol)` 账本的 FIFO/no-short 校验，并在同一提交边界内写入记录和失效或重建派生持仓视图。
+- 当 `PATCH` 会改变 `trader` 和/或 `symbol`（经 `code`）时，事务必须同时覆盖旧账本键与新账本键上的全部受影响 `(trader, symbol)` 组合；实现可按 `(trader, symbol)` 字典序锁定多个账本键，避免并发死锁。任一受影响账本在全量时序重放后出现负持仓，则整笔事务失败，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。
 - 对同一记录的并发修改或删除，只有一个请求能先提交；后提交请求必须基于最新 `version` 重新提交。
+
+### 2.8 `trader` 字段校验（统一规则）
+
+下列规则适用于请求体字段 `trader` 与查询参数 `trader`（路径已标明可选的除外）。
+
+| 规则 | 要求 |
+| --- | --- |
+| JSON 类型 | 必须是 JSON string；`null`、number、boolean、object、array 均返回 `422 VALIDATION_ERROR`，`details.fields[].path` 为 `trader` |
+| 必填（写入） | `POST /api/records` 必须包含 `trader`；缺失返回 `422`，`message` 指出必填 |
+| Trim | 写入与查询过滤均先按 ECMAScript `String.prototype.trim`（Unicode 空白）去掉首尾空白，再校验与比较；持久化与响应中的 `trader` 为 trim 后的值 |
+| 空白 | trim 后长度为 `0`（空串或仅空白）→ `422 VALIDATION_ERROR` |
+| 长度 | trim 后长度必须为 `1` 到 `64`（与 `name` 相同：按 JavaScript 字符串 `.length` / UTF-16 code unit 计数）；超出 → `422` |
+| 内容 | 允许 Unicode 文本（含中文、冒号等），例如 `AI选股:atr_pct`、`杨鹏`；不在服务端解释标签语义 |
+| 查询过滤 | `GET` 上可选的 `?trader=` 若出现，必须通过上表类型/trim/空白/长度规则；合法但当前无任何记录使用该标签 → 空列表（`total: 0`），不是 `404` |
+| 不是身份 | 不得映射为 `user_id`；不得因 `trader` 不同而返回 `401`/`403` |
 
 ## 3. 交易记录资源
 
@@ -162,6 +181,7 @@
 | --- | --- | --- | --- | --- |
 | `id` | string | 响应必有 | 否 | 稳定记录 ID，例如 `rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C` |
 | `version` | integer | 响应必有 | 否 | 资源版本，从 `1` 开始，每次成功修改递增 |
+| `trader` | string | 是 | 否 | 交易者标签；校验见 §2.8；参与 FIFO 账本键 `(trader, symbol)` |
 | `trade_date` | string | 是 | 否 | 交易日期，`YYYY-MM-DD` |
 | `trade_time` | string | 否 | 是 | 成交时间，`HH:mm:ss`；未知时为 `null` |
 | `code` | string | 是 | 否 | 六位代码 |
@@ -173,7 +193,7 @@
 | `fee` | number | 否 | 否 | 交易费用，默认 `0` |
 | `tax` | number | 否 | 否 | 税费，默认 `0` |
 | `note` | string | 否 | 是 | 备注，最长 1000 个字符 |
-| `client_request_id` | string | 否 | 是 | 客户端防重复提交键，最长 80 个字符 |
+| `client_request_id` | string | 否 | 是 | 客户端防重复提交键，最长 80 个字符；**全局**唯一，不按 `trader` 分区 |
 | `created_at` | string | 响应必有 | 否 | 创建时间戳 |
 | `updated_at` | string | 响应必有 | 否 | 最近更新时间戳 |
 
@@ -181,19 +201,25 @@
 
 创建一条交易记录。新建成功返回 `201`。
 
-请求字段同 `TradeRecord` 中客户端可写字段：`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
+请求字段同 `TradeRecord` 中客户端可写字段：`trader`、`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
+
+`trader` 为必填；缺失、类型错误、仅空白或长度不合法时返回 `422 VALIDATION_ERROR`（见 §2.8）。不得缺省为 `未指定`——该字面量只用于 §8 对旧数据的确定性迁移，不作为新建缺省。
 
 重复提交语义：
 
 - `client_request_id` 缺失时，经济字段完全相同的多笔记录仍允许创建，因为用户可能拆单成交。
-- `client_request_id` 已存在且规范化请求体完全一致时，返回 `200` 和已存在记录，并返回顶层 `"meta": { "duplicate": true }`。该响应不是新建，不递增 `version`。
-- `client_request_id` 已存在但请求体不同，返回 `409 DUPLICATE_RECORD`。
-- 创建卖出记录会在同一事务内按第 6 节口径预演持仓；若导致负持仓，返回 `409 INSUFFICIENT_POSITION`。
+- `client_request_id` 的键空间是**全局**的：同一 `client_request_id` 不能绑定两条不同记录，即使它们的 `trader` 不同。客户端在相同 `symbol` 下为不同 `trader` 重放提交时，必须自行把请求 ID 作用域包含 `trader`（例如前缀），以避免跨标签误碰撞。
+- 规范化请求体指纹**必须包含** `trader`（及 `trade_date`、`trade_time`、`code`、`symbol`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`）。比较前对 `trader` 应用 §2.8 trim。
+- `client_request_id` 已存在且规范化请求体（含 `trader`）完全一致时，返回 `200` 和已存在记录，并返回顶层 `"meta": { "duplicate": true }`。该响应不是新建，不递增 `version`。
+- `client_request_id` 已存在但请求体不同（含 `trader` 不同），返回 `409 DUPLICATE_RECORD`。
+- 迁移前已写入的 `requests` 条目保留原 `key` 与 `recordId`（旧键行为）；迁移步骤会按 §8 把指纹重写为含 `trader` 的新公式，以便客户端用补齐后的 `trader: "未指定"` 重放仍命中 `duplicate: true`。新写入一律使用含 `trader` 的指纹。
+- 创建卖出记录会在同一事务内按第 6 节口径、仅在该记录的 `(trader, symbol)` 账本上预演持仓；若导致负持仓，返回 `409 INSUFFICIENT_POSITION`。
 
 请求示例：
 
 ```json
 {
+  "trader": "AI选股:atr_pct",
   "trade_date": "2026-10-12",
   "trade_time": "10:35:12",
   "code": "600519",
@@ -204,7 +230,7 @@
   "fee": 5,
   "tax": 0,
   "note": "突破前高后小仓位试单",
-  "client_request_id": "web-20261012-0001"
+  "client_request_id": "web-AI选股:atr_pct-20261012-0001"
 }
 ```
 
@@ -215,6 +241,7 @@
   "data": {
     "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
     "version": 1,
+    "trader": "AI选股:atr_pct",
     "trade_date": "2026-10-12",
     "trade_time": "10:35:12",
     "code": "600519",
@@ -226,7 +253,7 @@
     "fee": 5,
     "tax": 0,
     "note": "突破前高后小仓位试单",
-    "client_request_id": "web-20261012-0001",
+    "client_request_id": "web-AI选股:atr_pct-20261012-0001",
     "created_at": "2026-10-12T10:35:30+08:00",
     "updated_at": "2026-10-12T10:35:30+08:00"
   }
@@ -240,6 +267,7 @@
   "data": {
     "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
     "version": 1,
+    "trader": "AI选股:atr_pct",
     "trade_date": "2026-10-12",
     "trade_time": "10:35:12",
     "code": "600519",
@@ -251,12 +279,31 @@
     "fee": 5,
     "tax": 0,
     "note": "突破前高后小仓位试单",
-    "client_request_id": "web-20261012-0001",
+    "client_request_id": "web-AI选股:atr_pct-20261012-0001",
     "created_at": "2026-10-12T10:35:30+08:00",
     "updated_at": "2026-10-12T10:35:30+08:00"
   },
   "meta": {
     "duplicate": true
+  }
+}
+```
+
+缺失 `trader` 的错误示例：
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "请求字段校验失败",
+    "details": {
+      "fields": [
+        {
+          "path": "trader",
+          "message": "必填"
+        }
+      ]
+    }
   }
 }
 ```
@@ -269,6 +316,7 @@
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `trader` | string | 否 | 精确匹配 trim 后的交易者标签；缺省表示返回全部交易者的记录 |
 | `date` | string | 否 | 等于某个 `trade_date` |
 | `from` | string | 否 | 起始 `trade_date`，包含 |
 | `to` | string | 否 | 结束 `trade_date`，包含 |
@@ -283,6 +331,8 @@
 - `trade_date_desc`：`trade_date desc, trade_time desc nulls last, created_at desc, id desc`。
 - `trade_date_asc`：`trade_date asc, trade_time asc nulls last, created_at asc, id asc`。
 
+`?trader=` 非法时返回 `422`；合法但无匹配记录时返回空 `records` 与 `total: 0`。
+
 响应示例：
 
 ```json
@@ -292,6 +342,7 @@
       {
         "id": "rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C",
         "version": 1,
+        "trader": "AI选股:atr_pct",
         "trade_date": "2026-10-12",
         "trade_time": "10:35:12",
         "code": "600519",
@@ -303,7 +354,7 @@
         "fee": 5,
         "tax": 0,
         "note": "突破前高后小仓位试单",
-        "client_request_id": "web-20261012-0001",
+        "client_request_id": "web-AI选股:atr_pct-20261012-0001",
         "created_at": "2026-10-12T10:35:30+08:00",
         "updated_at": "2026-10-12T10:35:30+08:00"
       }
@@ -320,23 +371,42 @@
 
 ### 3.4 查询单条记录：GET /api/records/{id}
 
-按稳定 ID 查询交易记录。不存在时返回 `404 NOT_FOUND`。
+按稳定 ID 查询交易记录。响应为完整 `TradeRecord`（含 `trader`）。不存在时返回 `404 NOT_FOUND`。
 
 ### 3.5 修改记录：PATCH /api/records/{id}
 
 部分更新一条交易记录。至少提交一个可写字段，并必须提交 `expected_version`。`expected_version` 只用于并发前置检查，不写入资源。`id`、`version`、`symbol`、`created_at`、`updated_at` 不可由客户端直接修改。
 
-可写字段：`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
+可写字段：`trader`、`trade_date`、`trade_time`、`code`、`name`、`side`、`price`、`quantity`、`fee`、`tax`、`note`、`client_request_id`。
 
-修改会在同一事务内重新计算受影响 `symbol` 的全量持仓路径；若修改后任一时点出现负持仓，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。成功后返回更新后的完整 `TradeRecord`，`version` 递增。
+`trader` 若出现在请求体中，必须通过 §2.8；不得写成 `null` 或空白。
 
-请求示例：
+修改会在同一事务内重新计算所有受影响 `(trader, symbol)` 账本的全量持仓路径：
+
+- 若仅改经济字段且 `trader`/`symbol` 不变：重放该账本。
+- 若 `trader` 和/或 `symbol` 变化：先从旧账本移除该记录的效果，再纳入新账本，并对旧、新账本分别做 FIFO/no-short 全量校验。任一账本失败 → `409 INSUFFICIENT_POSITION`，整笔不提交。
+- 若同时修改 `client_request_id`：新键不得与**其他**记录占用的全局键冲突；冲突 → `409 DUPLICATE_RECORD`。若键不变但规范化指纹因字段（含 `trader`）变化而变化，更新该 `requests` 条目的指纹，键与 `recordId` 保持不变。
+- 若把 `client_request_id` 从有值改为 `null`：删除该记录对应的 `requests` 条目。
+- 成功后返回更新后的完整 `TradeRecord`，`version` 递增；`updated_at` 更新。
+
+对已用 `client_request_id` 创建的记录做 PATCH 后：后续用**旧**规范化体重放 `POST` 会因指纹不再匹配而得到 `409 DUPLICATE_RECORD`（键仍被占用）；要用当前体才能再次得到 `200` + `duplicate: true`。这与改价/改量后的既有幂等语义一致，现扩展到 `trader` 变更。
+
+请求示例（修正价格）：
 
 ```json
 {
   "expected_version": 1,
   "price": 1686.2,
   "note": "修正成交均价"
+}
+```
+
+请求示例（变更交易者标签，需通过旧/新账本校验）：
+
+```json
+{
+  "expected_version": 2,
+  "trader": "杨鹏"
 }
 ```
 
@@ -350,7 +420,64 @@
 DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 ```
 
-删除会在同一事务内预演该标的剩余记录的持仓路径；如果删除一笔买入会导致后续卖出无可匹配持仓，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。客户端应先删除或修改依赖该买入的卖出记录。
+删除会在同一事务内、仅在该记录所属 `(trader, symbol)` 账本上预演剩余记录的持仓路径；如果删除一笔买入会导致后续卖出无可匹配持仓，返回 `409 INSUFFICIENT_POSITION`，原记录保持不变。客户端应先删除或修改依赖该买入的卖出记录。
+
+删除成功后的持久化效果：
+
+- 从 `records` 硬删除该行（无 tombstone）。
+- 删除所有 `recordId` 指向该记录的 `requests` 条目，从而释放其 `client_request_id`。
+- `reviews` 与其他记录的 `id`/`version`/`client_request_id` 不变。
+- 若该 `trader` 下已无剩余记录，后续 `GET /api/traders` 不再列出该标签。
+- 派生当前持仓与历史收益按剩余记录重算；已删除卖出对应的历史行不再出现。
+
+## 3.7 交易者列表：GET /api/traders
+
+返回当前 `records` 中**实际出现过**的去重 `trader` 标签及其记录条数。本接口**豁免分页**：不接受 `limit`/`offset`/`sort`；传入这些查询参数返回 `422 VALIDATION_ERROR`。无 `meta`。
+
+响应 envelope：
+
+```json
+{
+  "data": {
+    "traders": [
+      {
+        "trader": "AI选股:atr_pct",
+        "record_count": 3
+      },
+      {
+        "trader": "杨鹏",
+        "record_count": 2
+      },
+      {
+        "trader": "未指定",
+        "record_count": 1
+      }
+    ]
+  }
+}
+```
+
+字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `traders` | array | 去重后的交易者条目列表 |
+| `traders[].trader` | string | 标签字面量（已 trim） |
+| `traders[].record_count` | integer | 该标签下未删除的交易记录条数，`>= 1` |
+
+稳定顺序：按 `trader` 字符串做升序排序，比较口径为 UTF-16 code unit 字典序（与 JavaScript 默认字符串 `<` 一致），相同标签只出现一次。
+
+空结果（无任何交易记录）：
+
+```json
+{
+  "data": {
+    "traders": []
+  }
+}
+```
+
+不返回 `404`。本接口只统计交易记录，不统计复盘，也不预置未使用过的标签。
 
 ## 4. 每日复盘资源
 
@@ -366,7 +493,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `created_at` | string | 响应必有 | 否 | 创建时间戳 |
 | `updated_at` | string | 响应必有 | 否 | 最近更新时间戳 |
 
-同一 `date` 只允许一条每日复盘。需要修改正文时使用 `PATCH /api/reviews/{id}`。
+同一 `date` 只允许一条每日复盘。需要修改正文时使用 `PATCH /api/reviews/{id}`。复盘资源不包含 `trader`，也不按交易者过滤。
 
 ### 4.2 创建复盘：POST /api/reviews
 
@@ -447,7 +574,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 - `GET /api/reviews/{id}`：按 ID 查询复盘，不存在时返回 `404 NOT_FOUND`。
 - `PATCH /api/reviews/{id}`：可修改 `date`、`content`、`tags`，请求体必须包含 `expected_version`。若新 `date` 与另一条复盘冲突，返回 `409 DUPLICATE_REVIEW`；若版本不匹配，返回 `409 VERSION_CONFLICT`。
-- `DELETE /api/reviews/{id}?expected_version=1`：删除复盘。成功返回 `204` 且无响应体；版本不匹配时返回 `409 VERSION_CONFLICT`。
+- `DELETE /api/reviews/{id}?expected_version=1`：删除复盘。成功返回 `204` 且无响应体；版本不匹配时返回 `409 VERSION_CONFLICT`。硬删除，无 tombstone。
 
 ## 5. 行情价格字段
 
@@ -468,17 +595,18 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 ## 6. 持仓与收益计算口径
 
-### 6.1 成交匹配
+### 6.1 成交匹配（按交易者分账）
 
-- 持仓按 `symbol` 独立计算。
-- 记录排序为 `trade_date asc, trade_time asc nulls last, created_at asc, id asc`。
-- 卖出按 FIFO 消耗最早未卖出的买入 lot。
-- 不支持做空。任一卖出数量超过此前未卖出数量时，创建、修改或删除操作返回 `409 INSUFFICIENT_POSITION`。
-- 一笔卖出可以消耗多个买入 lot；内部可以有多段 FIFO 匹配批次，但对外历史收益列表必须按卖出记录聚合为一行。
+- **假设（待产品确认前作为实现口径）**：每个 `trader` 拥有独立的 FIFO 账本。买入、卖出、禁止做空，以及已实现/当前持仓，均按 `(trader, symbol)` 分区；不同 `trader` 之间的同名 `symbol` **不得**互相消耗 lot。
+- 在同一 `(trader, symbol)` 账本内：记录排序为 `trade_date asc, trade_time asc nulls last, created_at asc, id asc`。
+- 卖出按 FIFO 消耗**同一** `trader` 下该 `symbol` 最早未卖出的买入 lot。
+- 不支持做空。任一卖出数量超过该账本此前未卖出数量时，创建、修改或删除操作返回 `409 INSUFFICIENT_POSITION`。
+- 一笔卖出可以消耗多个买入 lot；内部可以有多段 FIFO 匹配批次，但对外历史收益列表必须按卖出记录聚合为一行，且该行的 `trader` 等于卖出记录的 `trader`。
+- 未带 `?trader=` 过滤时，当前持仓与历史收益返回**所有**交易者账本的行；每一行必须带有自己的 `trader`，不得把多交易者持仓合并为单行。
 
 ### 6.2 成本、盈亏和收益率
 
-下列公式均指内部十进制定点精确值；响应字段按 §2.4 各自精度独立舍入，不要求已舍入 JSON 值彼此可逆。
+下列公式均指内部十进制定点精确值；响应字段按 §2.4 各自精度独立舍入，不要求已舍入 JSON 值彼此可逆。公式在单个 `(trader, symbol)` 账本内计算。
 
 定义：
 
@@ -488,7 +616,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 - 已实现盈亏：精确 `allocated_sell_net_amount - consumed_cost_amount`，再按金额精度舍入为 `realized_pnl`。
 - 已实现收益率：精确 `realized_pnl_exact / consumed_cost_amount`，再按收益率精度舍入。当分母为 `0` 时返回 `null`；正常买入成本不应为 `0`。
 - 当前持仓成本金额：所有未卖出 lot 的剩余成本金额之和，再按金额精度舍入为 `cost_amount`。
-- 当前持仓成本价：精确 `cost_amount_exact / quantity`，再按价格精度舍入为 `cost`。当 `quantity` 为 `0` 时该标的不出现在当前持仓。
+- 当前持仓成本价：精确 `cost_amount_exact / quantity`，再按价格精度舍入为 `cost`。当 `quantity` 为 `0` 时该 `(trader, symbol)` 不出现在当前持仓。
 - 当前市值：精确 `current_price * quantity`，再按金额精度舍入。`current_price` 为 `null` 时返回 `null`。
 - 未实现盈亏：精确 `market_value_exact - cost_amount_exact`，再按金额精度舍入。市值不可用时返回 `null`。
 - 未实现收益率：精确 `unrealized_pnl_exact / cost_amount_exact`，再按收益率精度舍入。分母为 `0` 或价格不可用时返回 `null`。
@@ -498,38 +626,49 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 - 买入 1 股 `@10.005`，卖出 1 股 `@10.014`，费税均为 `0`：响应 `cost_amount=10.01`、`exit_amount=10.01`，但精确盈亏 `0.009` 舍入为 `realized_pnl=0.01`，`return_rate=0.0009`。此时已舍入的 `exit_amount - cost_amount` 为 `0`，不等于 `realized_pnl`。
 - 买入 3 股 `@10.0001`，费税 `0`：响应 `cost_amount=30.00`，但精确平均成本舍入为 `cost=10.0001`。此时已舍入的 `cost_amount / quantity` 为 `10`，不等于 `cost`。
 
-当前持仓和历史收益必须使用同一套 FIFO、费税、分摊口径；各响应字段仍按 §2.4 独立舍入。
+当前持仓和历史收益必须使用同一套按 `(trader, symbol)` 分区的 FIFO、费税、分摊口径；各响应字段仍按 §2.4 独立舍入。
+
+### 6.3 `position_key`
+
+- `position_key` 是当前持仓行的稳定不透明键，必须在全体持仓行中唯一标识一对 `(trader, symbol)`。
+- 规范构造：`position_key = trader + "\u001f" + symbol`，其中 `\u001f` 为 ASCII Unit Separator（U+001F）。示例：`trader` 为 `杨鹏`、`symbol` 为 `600519.SH` 时，`position_key` 为 `杨鹏` + U+001F + `600519.SH`。
+- 客户端必须把 `position_key` 当作不透明字符串；展示与过滤应使用响应中的 `trader` 与 `symbol`/`code` 字段，不得依赖自行拆分 `position_key`。
+- 历史收益行不使用 `position_key`；其稳定行 ID 仍为 `history_id = sell_record_id`。
 
 ## 7. 持仓接口
 
 ### 7.1 当前持仓：GET /api/positions/current
 
-返回 `as_of` 截止的未平仓持仓。
+返回 `as_of` 截止的未平仓持仓。每一行对应一个 `(trader, symbol)` 账本上的未平仓头寸。
 
 查询参数：
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `as_of` | string | 否 | 截止日期，默认请求发生时的 `Asia/Shanghai` 日期 |
+| `trader` | string | 否 | 只返回该交易者账本；缺省表示返回全部交易者的持仓行 |
 | `code` | string | 否 | 六位代码过滤 |
 | `limit` | integer | 否 | 默认 `50`，最大 `200` |
 | `offset` | integer | 否 | 默认 `0` |
 | `sort` | string | 否 | `symbol_asc`、`market_value_desc`、`return_rate_desc`，默认 `symbol_asc` |
 
+`?trader=` 校验同 §2.8；合法但无持仓时返回空 `positions`。
+
 排序规则：
 
-- `symbol_asc`：`symbol asc, position_key asc`。
-- `market_value_desc`：`market_value desc nulls last, symbol asc, position_key asc`。
-- `return_rate_desc`：`return_rate desc nulls last, symbol asc, position_key asc`。
+- `symbol_asc`：`symbol asc, trader asc, position_key asc`。
+- `market_value_desc`：`market_value desc nulls last, symbol asc, trader asc, position_key asc`。
+- `return_rate_desc`：`return_rate desc nulls last, symbol asc, trader asc, position_key asc`。
 
 响应字段：
 
 | 字段 | 类型 | 可为空 | 说明 |
 | --- | --- | --- | --- |
-| `position_key` | string | 否 | 当前持仓稳定键，等于 `symbol` |
+| `position_key` | string | 否 | 稳定键，见 §6.3 |
+| `trader` | string | 否 | 该持仓所属交易者标签 |
 | `code` | string | 否 | 六位代码 |
 | `symbol` | string | 否 | 标准标的 |
-| `name` | string | 否 | 最近一笔相关记录的显示名称 |
+| `name` | string | 否 | 该账本内最近一笔相关记录的显示名称 |
 | `open_date` | string | 否 | 当前未平仓 lot 中最早买入日期 |
 | `quantity` | integer | 否 | 当前持仓股数 |
 | `cost` | number | 否 | 当前平均成本价；精确成本金额 ÷ 数量后按价格精度独立舍入，不等于已舍入 `cost_amount / quantity` |
@@ -550,7 +689,8 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
     "as_of": "2026-10-12",
     "positions": [
       {
-        "position_key": "600519.SH",
+        "position_key": "AI选股:atr_pct\u001f600519.SH",
+        "trader": "AI选股:atr_pct",
         "code": "600519",
         "symbol": "600519.SH",
         "name": "贵州茅台",
@@ -565,12 +705,30 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
         "market_value": 171230,
         "unrealized_pnl": 2375,
         "return_rate": 0.014065
+      },
+      {
+        "position_key": "杨鹏\u001f600519.SH",
+        "trader": "杨鹏",
+        "code": "600519",
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "open_date": "2026-10-10",
+        "quantity": 50,
+        "cost": 1670.1,
+        "cost_amount": 83505,
+        "current_price": 1712.3,
+        "price_source": "local_daily",
+        "price_as_of": "2026-10-12T15:00:00+08:00",
+        "price_status": "fresh",
+        "market_value": 85615,
+        "unrealized_pnl": 2110,
+        "return_rate": 0.025268
       }
     ],
     "pagination": {
       "limit": 50,
       "offset": 0,
-      "total": 1,
+      "total": 2,
       "has_more": false
     }
   }
@@ -581,7 +739,8 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 ```json
 {
-  "position_key": "600519.SH",
+  "position_key": "杨鹏\u001f600519.SH",
+  "trader": "杨鹏",
   "code": "600519",
   "symbol": "600519.SH",
   "name": "贵州茅台",
@@ -601,7 +760,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 ### 7.2 历史收益：GET /api/positions/history
 
-返回由卖出记录产生的已实现收益行。部分卖出也会产生历史收益行，即使该标的仍有剩余持仓。对外一笔卖出记录只产生一行历史收益；内部 FIFO 匹配批次不得作为响应行 ID 暴露。
+返回由卖出记录产生的已实现收益行。部分卖出也会产生历史收益行，即使该标的在同一 `trader` 下仍有剩余持仓。对外一笔卖出记录只产生一行历史收益；内部 FIFO 匹配批次不得作为响应行 ID 暴露。匹配仅发生在卖出记录自身的 `(trader, symbol)` 账本内。
 
 查询参数：
 
@@ -609,6 +768,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | --- | --- | --- | --- |
 | `from` | string | 否 | `close_date` 起始日期，包含 |
 | `to` | string | 否 | `close_date` 结束日期，包含 |
+| `trader` | string | 否 | 只返回该交易者的已实现行；缺省表示全部交易者 |
 | `code` | string | 否 | 六位代码过滤 |
 | `limit` | integer | 否 | 默认 `50`，最大 `200` |
 | `offset` | integer | 否 | 默认 `0` |
@@ -627,7 +787,8 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | --- | --- | --- | --- |
 | `history_id` | string | 否 | 稳定历史收益行 ID，等于 `sell_record_id` |
 | `sell_record_id` | string | 否 | 产生该收益的卖出记录 ID |
-| `buy_record_ids` | string[] | 否 | 被该卖出消耗的买入记录 ID 去重列表，按首次被消耗顺序排列 |
+| `buy_record_ids` | string[] | 否 | 被该卖出消耗的买入记录 ID 去重列表，按首次被消耗顺序排列；均属于同一 `trader` |
+| `trader` | string | 否 | 卖出记录的交易者标签 |
 | `code` | string | 否 | 六位代码 |
 | `symbol` | string | 否 | 标准标的 |
 | `name` | string | 否 | 卖出记录的显示名称 |
@@ -655,6 +816,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
           "rec_01HZ8VCY6N4Q6Y7Z4R0ME2P1XA",
           "rec_01HZA9Z4D7Q8R2B1K6V0MN5P3C"
         ],
+        "trader": "杨鹏",
         "code": "000001",
         "symbol": "000001.SZ",
         "name": "平安银行",
@@ -679,3 +841,36 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
   }
 }
 ```
+
+## 8. 本地 JSON 持久化与 trader 迁移
+
+### 8.1 磁盘状态
+
+- 权威文件：`backend/trade-journal-node/.data/journal.json`（路径可配置，但语义不变）。
+- 顶层字段：`schema_version`（integer）、`records`（array）、`reviews`（array）、`requests`（array）。
+- `requests` 元素至少包含：`key`（即 `client_request_id` 字符串）、`recordId`、`fingerprint`（规范化体序列化）。
+- 写入必须原子：写入临时文件 → `fsync` → `rename` 覆盖目标（与现有 Node 实现一致）。迁移与普通业务写共享同一原子提交边界；不得出现只写了一半记录的可见中间态。
+
+### 8.2 从无 `trader` 的 schema_version=1 迁出
+
+启动加载或任何写路径打开状态时，若满足下列任一条件则执行一次性确定性迁移：
+
+1. 存在至少一条 `records[]` 元素缺少 `trader` 属性，或 `trader` 为 `null`/非字符串/trim 后为空；或
+2. `schema_version === 1` 且实现已切换到要求每条记录具备 `trader` 的代码路径。
+
+迁移步骤（必须全部在同一次原子写中完成）：
+
+1. 对每条需要修复的记录：设置 `trader` 为字面量 `未指定`（U+672A U+6307 U+5B9A）。**不**修改 `id`、`version`、`created_at`、`updated_at` 或其他业务字段。
+2. 已具备合法非空 `trader` 的记录保持原值。
+3. `reviews` 数组原样保留（含全部 `id`/版本/内容）。
+4. `requests`：保留每条的 `key` 与 `recordId`（旧键行为：键仍为全局 `client_request_id`，不改名、不按 trader 加前缀）。将 `fingerprint` **重写**为含该 `recordId` 对应记录当前 `trader` 的新规范化公式，使迁移后客户端用相同经济字段并显式传 `trader: "未指定"` 的 `POST` 仍可命中 `200` + `duplicate: true`。找不到对应记录的孤儿 `requests` 条目删除。
+5. 将 `schema_version` 设为 `2`。
+6. 原子写回磁盘。若写失败，内存不得对外服务半迁移状态；下次加载重试同一确定性步骤。
+
+迁移不重新分配记录 ID，不递增 `version`，不改变复盘，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止——迁移后所有旧记录落入 `未指定` 账本，彼此仍按 FIFO 匹配，与迁移前“全体记录共一 symbol 账本”的数值结果一致。
+
+### 8.3 迁移后的客户端行为
+
+- 新建记录必须显式传 `trader`；不能省略以期望得到 `未指定`。
+- 若需继续向迁移记录追加买卖，应使用 `trader: "未指定"`，或先 `PATCH` 改标签并接受旧/新账本重校验。
+- `client_request_id` 仍为全局唯一；跨 `trader` 复用同一请求 ID 会 `409`。
