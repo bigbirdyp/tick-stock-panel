@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Modal } from '@/components/Modal'
@@ -38,7 +38,7 @@ function isJournalTab(value: string | null): value is Tab {
   return value === 'positions' || value === 'history' || value === 'records' || value === 'reviews'
 }
 
-// 只在首次挂载时读地址栏。jsdom 与浏览器都用 location.search；没有 window 时按缺省处理。
+// 挂载和浏览器后退前进都读地址栏。jsdom 与浏览器都用 location.search；没有 window 时按缺省处理。
 // 非法或缺省 tab 回到持仓；空白或缺省 trader 表示「全部」。
 function readLocationSearch(): string {
   if (typeof window === 'undefined') return ''
@@ -47,7 +47,8 @@ function readLocationSearch(): string {
 }
 
 // 用户点选交易者或栏目时写回地址栏。其它查询参数和 hash 原样保留。
-// 解析后的查询与当前一致则不 pushState，避免重复历史。本阶段不监听 popstate。
+// 解析后的查询与当前一致则不 pushState，避免重复历史。
+// 后退前进只读地址栏，不在这里写历史。
 function pushJournalSearch(update: (params: URLSearchParams) => void): void {
   if (typeof window === 'undefined') return
   const history = window.history
@@ -62,12 +63,13 @@ function pushJournalSearch(update: (params: URLSearchParams) => void): void {
   history.pushState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
 }
 
-// 「全部」或空白交易者删除 trader；不改当前栏目参数。
-function writeTraderSelection(trader: string | undefined): void {
+// 「全部」或空白交易者删除 trader，并在同一次历史记录里写上当前栏目。
+function writeTraderSelection(trader: string | undefined, nextTab: Tab): void {
   pushJournalSearch(params => {
     const name = trader?.trim() ?? ''
     if (name) params.set('trader', name)
     else params.delete('trader')
+    params.set('tab', nextTab)
   })
 }
 
@@ -132,6 +134,13 @@ export function TradeJournalPage() {
     queryFn: () => journal.listReviews(reviewQuery),
     enabled: tab === 'reviews',
   })
+
+  const sectionCodeRef = useRef({ positions: '', history: '', records: '' })
+  sectionCodeRef.current = {
+    positions: positionQuery.code ?? '',
+    history: historyQuery.code ?? '',
+    records: recordQuery.code ?? '',
+  }
 
   const invalidate = () => qc.invalidateQueries({ queryKey: QK.tradeJournal })
 
@@ -206,8 +215,32 @@ export function TradeJournalPage() {
     setPositionQuery(query => withTrader(query, trader))
     setHistoryQuery(query => withTrader(query, trader))
     setRecordQuery(query => withTrader(query, trader))
-    writeTraderSelection(trader)
+    writeTraderSelection(trader, tab)
   }
+
+  // 只消费浏览器后退前进。交易者过滤沿用 withTrader；复盘过滤留给后续阶段。
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+    const restoreJournalFromHistory = () => {
+      const next = initialJournalView()
+      setTab(next.tab)
+      const applyTrader = <T extends { trader?: string; offset?: number }>(query: T): T => {
+        const current = query.trader?.trim() || undefined
+        if (current === next.trader) return query
+        return withTrader(query, next.trader)
+      }
+      setPositionQuery(query => applyTrader(query))
+      setHistoryQuery(query => applyTrader(query))
+      setRecordQuery(query => applyTrader(query))
+      const code = next.tab === 'positions' ? sectionCodeRef.current.positions
+        : next.tab === 'history' ? sectionCodeRef.current.history
+        : next.tab === 'records' ? sectionCodeRef.current.records
+        : ''
+      setCodeInput(code)
+    }
+    window.addEventListener('popstate', restoreJournalFromHistory)
+    return () => window.removeEventListener('popstate', restoreJournalFromHistory)
+  }, [])
 
   useEffect(() => {
     const selected = recordQuery.trader
