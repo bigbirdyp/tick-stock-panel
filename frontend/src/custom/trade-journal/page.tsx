@@ -39,11 +39,43 @@ function isJournalTab(value: string | null): value is Tab {
 }
 
 // 只在首次挂载时读地址栏。jsdom 与浏览器都用 location.search；没有 window 时按缺省处理。
-// 非法或缺省 tab 回到持仓；空白或缺省 trader 表示「全部」。本阶段不写回 URL，也不接 popstate。
+// 非法或缺省 tab 回到持仓；空白或缺省 trader 表示「全部」。
 function readLocationSearch(): string {
   if (typeof window === 'undefined') return ''
   const search = window.location?.search
   return typeof search === 'string' ? search : ''
+}
+
+// 用户点选交易者或栏目时写回地址栏。其它查询参数和 hash 原样保留。
+// 解析后的查询与当前一致则不 pushState，避免重复历史。本阶段不监听 popstate。
+function pushJournalSearch(update: (params: URLSearchParams) => void): void {
+  if (typeof window === 'undefined') return
+  const history = window.history
+  if (typeof history?.pushState !== 'function') return
+  const current = new URLSearchParams(readLocationSearch())
+  const next = new URLSearchParams(current)
+  update(next)
+  if (next.toString() === current.toString()) return
+  const query = next.toString()
+  const pathname = typeof window.location.pathname === 'string' ? window.location.pathname : ''
+  const hash = typeof window.location.hash === 'string' ? window.location.hash : ''
+  history.pushState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
+}
+
+// 「全部」或空白交易者删除 trader；不改当前栏目参数。
+function writeTraderSelection(trader: string | undefined): void {
+  pushJournalSearch(params => {
+    const name = trader?.trim() ?? ''
+    if (name) params.set('trader', name)
+    else params.delete('trader')
+  })
+}
+
+// 只改 tab，保留地址栏里现有的 trader。
+function writeTabSelection(next: Tab): void {
+  pushJournalSearch(params => {
+    params.set('tab', next)
+  })
 }
 
 function initialJournalView(): { tab: Tab; trader?: string } {
@@ -124,6 +156,7 @@ export function TradeJournalPage() {
     setRecordEditor(null)
     setRecordQuery(query => ({ ...query, offset: 0 }))
     setTab('records')
+    writeTabSelection('records')
     toast(result.meta.duplicate ? '这笔交易已保存，无需重复录入' : '交易记录已保存', 'success')
     return result
   }
@@ -136,6 +169,7 @@ export function TradeJournalPage() {
     setReviewEditor(null)
     setReviewQuery(query => ({ ...query, offset: 0 }))
     setTab('reviews')
+    writeTabSelection('reviews')
     toast('复盘已保存', 'success')
     return result
   }
@@ -172,6 +206,7 @@ export function TradeJournalPage() {
     setPositionQuery(query => withTrader(query, trader))
     setHistoryQuery(query => withTrader(query, trader))
     setRecordQuery(query => withTrader(query, trader))
+    writeTraderSelection(trader)
   }
 
   useEffect(() => {
@@ -195,6 +230,7 @@ export function TradeJournalPage() {
     setTab(next)
     const code = next === 'positions' ? positionQuery.code : next === 'history' ? historyQuery.code : next === 'records' ? recordQuery.code : ''
     setCodeInput(code ?? '')
+    writeTabSelection(next)
   }
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
