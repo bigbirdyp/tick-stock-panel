@@ -34,6 +34,26 @@ const tabs: { key: Tab; label: string }[] = [
 
 const filterClass = 'h-8 rounded-md border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent'
 
+function isJournalTab(value: string | null): value is Tab {
+  return value === 'positions' || value === 'history' || value === 'records' || value === 'reviews'
+}
+
+// 只在首次挂载时读地址栏。jsdom 与浏览器都用 location.search；没有 window 时按缺省处理。
+// 非法或缺省 tab 回到持仓；空白或缺省 trader 表示「全部」。本阶段不写回 URL，也不接 popstate。
+function readLocationSearch(): string {
+  if (typeof window === 'undefined') return ''
+  const search = window.location?.search
+  return typeof search === 'string' ? search : ''
+}
+
+function initialJournalView(): { tab: Tab; trader?: string } {
+  const params = new URLSearchParams(readLocationSearch())
+  const tabParam = params.get('tab')
+  const tab: Tab = isJournalTab(tabParam) ? tabParam : 'positions'
+  const trader = params.get('trader')?.trim()
+  return trader ? { tab, trader } : { tab }
+}
+
 function withTrader<T extends { trader?: string; offset?: number }>(query: T, trader: string | undefined): T {
   const next: T = { ...query, offset: 0 }
   if (trader) next.trader = trader
@@ -43,10 +63,11 @@ function withTrader<T extends { trader?: string; offset?: number }>(query: T, tr
 
 export function TradeJournalPage() {
   const qc = useQueryClient()
-  const [tab, setTab] = useState<Tab>('positions')
-  const [positionQuery, setPositionQuery] = useState<PositionQuery>({ as_of: shanghaiToday(), limit: 20, offset: 0, sort: 'symbol_asc' })
-  const [historyQuery, setHistoryQuery] = useState<HistoryQuery>({ limit: 20, offset: 0, sort: 'close_date_desc' })
-  const [recordQuery, setRecordQuery] = useState<RecordListQuery>({ limit: 20, offset: 0, sort: 'trade_date_desc' })
+  const [view] = useState<{ tab: Tab; trader?: string }>(initialJournalView)
+  const [tab, setTab] = useState<Tab>(view.tab)
+  const [positionQuery, setPositionQuery] = useState<PositionQuery>(() => withTrader({ as_of: shanghaiToday(), limit: 20, offset: 0, sort: 'symbol_asc' }, view.trader))
+  const [historyQuery, setHistoryQuery] = useState<HistoryQuery>(() => withTrader({ limit: 20, offset: 0, sort: 'close_date_desc' }, view.trader))
+  const [recordQuery, setRecordQuery] = useState<RecordListQuery>(() => withTrader({ limit: 20, offset: 0, sort: 'trade_date_desc' }, view.trader))
   const [reviewQuery, setReviewQuery] = useState<ReviewListQuery>({ limit: 20, offset: 0, sort: 'date_desc' })
   const [codeInput, setCodeInput] = useState('')
   const [recordEditor, setRecordEditor] = useState<TradeRecord | 'new' | null>(null)
