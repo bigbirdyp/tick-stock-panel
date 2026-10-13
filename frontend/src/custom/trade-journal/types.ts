@@ -7,6 +7,9 @@ export type ReviewSort = 'date_desc' | 'date_asc'
 export type PositionSort = 'symbol_asc' | 'market_value_desc' | 'return_rate_desc'
 export type HistorySort = 'close_date_desc' | 'close_date_asc'
 
+/** §8 只把缺失或非法的旧记录回填成这个字面量。新建记录不得把它当缺省值。 */
+export const LEGACY_TRADER_LABEL = '未指定'
+
 export interface Pagination {
   limit: number
   offset: number
@@ -22,6 +25,7 @@ export interface FieldError {
 export interface TradeRecord {
   id: string
   version: number
+  trader: string
   trade_date: string
   trade_time: string | null
   code: string
@@ -39,6 +43,7 @@ export interface TradeRecord {
 }
 
 export interface RecordWrite {
+  trader: string
   trade_date: string
   trade_time?: string | null
   code: string
@@ -55,6 +60,7 @@ export interface RecordWrite {
 
 export interface RecordPatch {
   expected_version: number
+  trader?: string
   trade_date?: string
   trade_time?: string | null
   code?: string
@@ -70,6 +76,7 @@ export interface RecordPatch {
 }
 
 export interface RecordListQuery {
+  trader?: string
   date?: string
   from?: string
   to?: string
@@ -83,6 +90,15 @@ export interface RecordListQuery {
 export interface RecordList {
   records: TradeRecord[]
   pagination: Pagination
+}
+
+export interface TraderSummary {
+  trader: string
+  record_count: number
+}
+
+export interface TraderList {
+  traders: TraderSummary[]
 }
 
 export interface DailyReview {
@@ -125,6 +141,7 @@ export interface ReviewList {
 
 export interface Position {
   position_key: string
+  trader: string
   code: string
   symbol: string
   name: string
@@ -149,6 +166,7 @@ export interface PositionList {
 
 export interface PositionQuery {
   as_of?: string
+  trader?: string
   code?: string
   limit?: number
   offset?: number
@@ -159,6 +177,7 @@ export interface HistoryRow {
   history_id: string
   sell_record_id: string
   buy_record_ids: string[]
+  trader: string
   code: string
   symbol: string
   name: string
@@ -182,6 +201,7 @@ export interface HistoryList {
 export interface HistoryQuery {
   from?: string
   to?: string
+  trader?: string
   code?: string
   limit?: number
   offset?: number
@@ -197,6 +217,7 @@ export interface ApiSuccess<T> {
 export interface TradeJournalApi {
   readonly mode: 'mock' | 'api'
   listRecords(query: RecordListQuery): Promise<ApiSuccess<RecordList>>
+  listTraders(): Promise<ApiSuccess<TraderList>>
   createRecord(body: RecordWrite): Promise<ApiSuccess<TradeRecord>>
   patchRecord(id: string, body: RecordPatch): Promise<ApiSuccess<TradeRecord>>
   deleteRecord(id: string, expectedVersion: number | undefined): Promise<void>

@@ -1,12 +1,16 @@
 import { useState, type FormEvent } from 'react'
 import { Modal } from '@/components/Modal'
 import { shanghaiToday } from './calendar'
-import { isTradeJournalError } from './errors'
-import { normalizeTradeTime } from './validate'
+import { TradeJournalError, isTradeJournalError } from './errors'
+import { normalizeTradeTime, normalizeTrader } from './validate'
 import type { ApiSuccess, DailyReview, RecordWrite, ReviewWrite, TradeRecord } from './types'
 
 const inputClass = 'h-9 w-full rounded-md border border-border bg-base px-3 text-sm text-foreground outline-none focus:border-accent'
 const textareaClass = 'w-full rounded-md border border-border bg-base px-3 py-2 text-sm text-foreground outline-none focus:border-accent'
+
+function traderInvalid(error: unknown): boolean {
+  return isTradeJournalError(error) && error.fields.some(field => field.path === 'trader')
+}
 
 function ErrorMessage({ error }: { error: unknown }) {
   if (!error) return null
@@ -29,11 +33,14 @@ function ErrorMessage({ error }: { error: unknown }) {
 
 interface RecordFormProps {
   record: TradeRecord | null
+  /** 当前已选交易者。仅作新建预填，不代替用户确认，也不使用「未指定」。 */
+  defaultTrader?: string
   onClose: () => void
   onSave: (body: RecordWrite, original: TradeRecord | null) => Promise<ApiSuccess<TradeRecord>>
 }
 
-export function RecordForm({ record, onClose, onSave }: RecordFormProps) {
+export function RecordForm({ record, defaultTrader = '', onClose, onSave }: RecordFormProps) {
+  const [trader, setTrader] = useState(record?.trader ?? defaultTrader)
   const [date, setDate] = useState(record?.trade_date ?? shanghaiToday())
   const [time, setTime] = useState(record?.trade_time ?? '')
   const [code, setCode] = useState(record?.code ?? '')
@@ -58,7 +65,13 @@ export function RecordForm({ record, onClose, onSave }: RecordFormProps) {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (pending) return
+    const traderResult = normalizeTrader(trader)
+    if (!traderResult.ok) {
+      setError(new TradeJournalError(traderResult.issue.status, traderResult.issue.code, traderResult.issue.message, traderResult.issue.fields))
+      return
+    }
     const body: RecordWrite = {
+      trader: traderResult.value,
       trade_date: date,
       trade_time: normalizeTradeTime(time),
       code,
@@ -87,6 +100,9 @@ export function RecordForm({ record, onClose, onSave }: RecordFormProps) {
           <h2 className="text-base font-semibold">{record ? '编辑交易记录' : '新增交易记录'}</h2>
           {record && <span className="text-xs text-muted">版本 {record.version}</span>}
         </div>
+        <label className="block space-y-1 text-xs text-secondary">交易者
+          <input className={inputClass} aria-label="交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" value={trader} onChange={e => changed(setTrader, e.target.value)} />
+        </label>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1 text-xs text-secondary">交易日期
             <input className={inputClass} aria-label="交易日期" type="date" required value={date} onChange={e => changed(setDate, e.target.value)} />

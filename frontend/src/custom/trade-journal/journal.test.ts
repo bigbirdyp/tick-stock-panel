@@ -4,9 +4,10 @@ import viteConfig from '../../../vite.config'
 import { createHttpTradeJournal } from './httpClient'
 import { createMockTradeJournal } from './mockStore'
 import type { RecordWrite } from './types'
-import { normalizeTradeTime } from './validate'
+import { normalizeRecordWrite, normalizeTradeTime } from './validate'
 
 const buy: RecordWrite = {
+  trader: '杨鹏',
   trade_date: '2026-10-12',
   trade_time: '09:30:00',
   code: '600519',
@@ -25,6 +26,29 @@ describe('成交时间', () => {
     expect(normalizeTradeTime('10:35:12')).toBe('10:35:12')
     expect(normalizeTradeTime('  ')).toBeNull()
     expect(normalizeTradeTime('25:00')).toBe('25:00')
+  })
+})
+
+describe('交易记录写入归一化', () => {
+  it('生成 docs/api.md 要求的 v2 client_request_id 指纹', () => {
+    const normalized = normalizeRecordWrite({ ...buy, trader: ' 杨鹏 ', trade_time: undefined, note: undefined })
+    expect(normalized.ok).toBe(true)
+    if (!normalized.ok) return
+    expect(normalized.value.fingerprint).toBe(JSON.stringify([
+      '杨鹏',
+      '2026-10-12',
+      null,
+      '600519',
+      '600519.SH',
+      '贵州茅台',
+      'buy',
+      10,
+      100,
+      1,
+      0,
+      null,
+      'test-buy-1',
+    ]))
   })
 })
 
@@ -76,6 +100,85 @@ describe('契约形状的开发 mock', () => {
     expect(changed.data.version).toBe(2)
     await expect(api.patchRecord(first.data.id, { expected_version: 1, note: '旧版本' })).rejects.toMatchObject({ code: 'VERSION_CONFLICT', status: 409 })
     await expect(api.createRecord({ ...buy, side: 'sell', quantity: 101, client_request_id: 'oversell' })).rejects.toMatchObject({ code: 'INSUFFICIENT_POSITION', status: 409 })
+  })
+
+  it('PATCH 后重放原始 POST 仍命中创建指纹，并返回当前记录', async () => {
+    const api = createMockTradeJournal()
+    const first = await api.createRecord(buy)
+    const patched = await api.patchRecord(first.data.id, { expected_version: 1, price: 11, trader: '改标签' })
+    expect(patched.data).toMatchObject({ version: 2, price: 11, trader: '改标签', client_request_id: buy.client_request_id })
+
+    const replay = await api.createRecord(buy)
+    expect(replay.status).toBe(200)
+    expect(replay.meta.duplicate).toBe(true)
+    expect(replay.data).toMatchObject({ id: first.data.id, version: 2, price: 11, trader: '改标签' })
+    expect((await api.listRecords({})).data.pagination.total).toBe(1)
+    await expect(api.createRecord({ ...buy, price: 11, trader: '改标签' })).rejects.toMatchObject({ status: 409, code: 'DUPLICATE_RECORD' })
+
+    const sameKey = await api.patchRecord(first.data.id, {
+      expected_version: 2,
+      client_request_id: buy.client_request_id,
+      note: '仍是原键',
+    })
+    expect((await api.createRecord(buy)).data).toMatchObject({ id: first.data.id, note: '仍是原键', price: 11 })
+
+    const moved = await api.patchRecord(first.data.id, { expected_version: sameKey.data.version, client_request_id: 'test-buy-2', price: 12 })
+    expect(moved.data).toMatchObject({ client_request_id: 'test-buy-2', price: 12, note: '仍是原键', trader: '改标签' })
+    expect((await api.createRecord(buy)).data).toMatchObject({ id: first.data.id, price: 12, client_request_id: 'test-buy-2' })
+    const newKeyReplay = await api.createRecord({
+      ...buy,
+      trader: '改标签',
+      price: 12,
+      note: '仍是原键',
+      client_request_id: 'test-buy-2',
+    })
+    expect(newKeyReplay.status).toBe(200)
+    expect(newKeyReplay.meta.duplicate).toBe(true)
+    expect(newKeyReplay.data.id).toBe(first.data.id)
+    await expect(api.createRecord({ ...buy, trader: '改标签', price: 99, note: '仍是原键', client_request_id: 'test-buy-2' })).rejects.toMatchObject({ status: 409, code: 'DUPLICATE_RECORD' })
+  })
+
+  it('交易者 A、B 和全部各自过滤记录与持仓，同名股票不跨账本', async () => {
+    const api = createMockTradeJournal()
+    await api.createRecord({ ...buy, trader: 'A', quantity: 100, client_request_id: 'a-buy' })
+    await api.createRecord({ ...buy, trader: 'B', quantity: 40, trade_time: '10:00:00', client_request_id: 'b-buy' })
+
+    const allRecords = (await api.listRecords({})).data
+    expect(allRecords.pagination.total).toBe(2)
+    expect(allRecords.records.map(row => row.trader).sort()).toEqual(['A', 'B'])
+    expect((await api.listRecords({ trader: 'A' })).data.records).toMatchObject([{ trader: 'A', quantity: 100 }])
+    expect((await api.listRecords({ trader: 'B' })).data.records).toMatchObject([{ trader: 'B', quantity: 40 }])
+    expect((await api.listRecords({ trader: '没有的人' })).data.pagination.total).toBe(0)
+
+    const allPositions = (await api.currentPositions({})).data.positions
+    expect(allPositions.map(row => row.trader).sort()).toEqual(['A', 'B'])
+    expect(allPositions.map(row => row.position_key).sort()).toEqual(['A\u001f600519.SH', 'B\u001f600519.SH'])
+    expect(allPositions.find(row => row.trader === 'A')).toMatchObject({ quantity: 100, symbol: '600519.SH' })
+    expect(allPositions.find(row => row.trader === 'B')).toMatchObject({ quantity: 40, symbol: '600519.SH' })
+    expect((await api.currentPositions({ trader: 'A' })).data.positions).toMatchObject([{ trader: 'A', quantity: 100 }])
+    expect((await api.currentPositions({ trader: 'B' })).data.positions).toMatchObject([{ trader: 'B', quantity: 40 }])
+    expect((await api.currentPositions({ trader: '没有的人' })).data.positions).toEqual([])
+
+    await expect(api.createRecord({
+      ...buy,
+      trader: 'B',
+      side: 'sell',
+      quantity: 50,
+      trade_time: '11:00:00',
+      client_request_id: 'b-oversell',
+    })).rejects.toMatchObject({ status: 409, code: 'INSUFFICIENT_POSITION' })
+    expect((await api.currentPositions({ trader: 'A' })).data.positions[0]?.quantity).toBe(100)
+  })
+
+  it('历史收益按交易者过滤，不跨交易者合并卖出收益', async () => {
+    const api = createMockTradeJournal()
+    await api.createRecord({ ...buy, trader: 'A', quantity: 100, client_request_id: 'history-a-buy' })
+    await api.createRecord({ ...buy, trader: 'B', quantity: 100, trade_time: '09:31:00', client_request_id: 'history-b-buy' })
+    await api.createRecord({ ...buy, trader: 'A', side: 'sell', quantity: 40, price: 12, trade_time: '10:00:00', client_request_id: 'history-a-sell' })
+
+    expect((await api.history({})).data.history.map(row => row.trader)).toEqual(['A'])
+    expect((await api.history({ trader: 'A' })).data.history).toMatchObject([{ trader: 'A', quantity: 40 }])
+    expect((await api.history({ trader: 'B' })).data.history).toEqual([])
   })
 
   it('每日复盘唯一日期且删除要求当前版本', async () => {
@@ -162,6 +265,33 @@ describe('同源 HTTP 客户端', () => {
     await api.deleteRecord('rec_1', 2)
     expect(paths[1]).toBe('/api/records/rec_1?expected_version=2')
   })
+
+  it('记录和持仓查询带上 trader，交易者列表走 /api/traders', async () => {
+    const paths: string[] = []
+    const fetchImpl: typeof fetch = async (input) => {
+      paths.push(String(input))
+      return new Response(JSON.stringify({
+        data: {
+          records: [],
+          traders: [],
+          positions: [],
+          as_of: '2026-10-13',
+          pagination: { limit: 50, offset: 0, total: 0, has_more: false },
+        },
+      }), { status: 200 })
+    }
+    const api = createHttpTradeJournal(fetchImpl)
+    await api.listRecords({ trader: 'A' })
+    await api.currentPositions({ trader: 'B' })
+    await api.history({ trader: 'C' })
+    await api.listTraders()
+    expect(paths).toEqual([
+      '/api/records?trader=A',
+      '/api/positions/current?trader=B',
+      '/api/positions/history?trader=C',
+      '/api/traders',
+    ])
+  })
 })
 
 it('开发代理仅把交易日记契约路径发往 Node', () => {
@@ -172,10 +302,10 @@ it('开发代理仅把交易日记契约路径发往 Node', () => {
     const route = match?.[1]
     return typeof route === 'string' ? route : route?.target
   }
-  for (const path of ['/api/records', '/api/records?limit=20', '/api/records/rec_1', '/api/reviews', '/api/reviews/rev_1', '/api/positions/current', '/api/positions/history?limit=20']) {
+  for (const path of ['/api/records', '/api/records?limit=20', '/api/records/rec_1', '/api/traders', '/api/traders?x=1', '/api/reviews', '/api/reviews/rev_1', '/api/positions/current', '/api/positions/history?limit=20']) {
     expect(targetFor(path), path).toBe('http://127.0.0.1:3022')
   }
-  for (const path of ['/api/settings', '/api/positions/other', '/api/records-extra', '/api/reviews-extra']) {
+  for (const path of ['/api/settings', '/api/positions/other', '/api/records-extra', '/api/reviews-extra', '/api/traders/extra']) {
     expect(targetFor(path), path).not.toBe('http://127.0.0.1:3022')
   }
 })

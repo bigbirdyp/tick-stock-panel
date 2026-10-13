@@ -19,6 +19,7 @@ import type {
   ReviewWrite,
   TradeJournalApi,
   TradeRecord,
+  TraderList,
 } from './types'
 import {
   historySorts,
@@ -33,6 +34,7 @@ import {
   validateDateRange,
   validatePage,
   validateSort,
+  validateTraderFilter,
   type NormalizedRecord,
   type RecordIssue,
 } from './validate'
@@ -119,6 +121,7 @@ function toRecord(id: string, version: number, normalized: NormalizedRecord, cre
   return {
     id,
     version,
+    trader: normalized.trader,
     trade_date: normalized.trade_date,
     trade_time: normalized.trade_time,
     code: normalized.code,
@@ -173,7 +176,10 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (query.side != null && query.side !== 'buy' && query.side !== 'sell') {
         fail({ status: 422, code: 'VALIDATION_ERROR', message: '请求字段校验失败', fields: [{ path: 'side', message: '只能是 buy 或 sell' }] })
       }
+      const traderFilter = validateTraderFilter(query.trader)
+      if (traderFilter.issue) fail(traderFilter.issue)
       const filtered = [...records.values()].filter(record => {
+        if (traderFilter.trader != null && record.trader !== traderFilter.trader) return false
         if (query.date != null && record.trade_date !== query.date) return false
         if (query.from != null && record.trade_date < query.from) return false
         if (query.to != null && record.trade_date > query.to) return false
@@ -184,6 +190,18 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       const sorted = sortRecords(filtered, query.sort ?? 'trade_date_desc')
       const page = pageOf(sorted, query.limit, query.offset)
       const data: RecordList = { records: page.rows, pagination: page.pagination }
+      return ok(data)
+    },
+
+    async listTraders() {
+      const counts = new Map<string, number>()
+      for (const record of records.values()) {
+        counts.set(record.trader, (counts.get(record.trader) ?? 0) + 1)
+      }
+      const traders = [...counts.entries()]
+        .map(([trader, record_count]) => ({ trader, record_count }))
+        .sort((left, right) => (left.trader < right.trader ? -1 : left.trader > right.trader ? 1 : 0))
+      const data: TraderList = { traders }
       return ok(data)
     },
 
@@ -226,6 +244,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
         fail({ status: 422, code: 'VALIDATION_ERROR', message: '请求字段校验失败', fields: [{ path: 'expected_version', message: '至少修改一个字段' }] })
       }
       const merged: RecordWrite = {
+        trader: body.trader ?? current.trader,
         trade_date: body.trade_date ?? current.trade_date,
         trade_time: Object.prototype.hasOwnProperty.call(body, 'trade_time') ? body.trade_time : current.trade_time,
         code: body.code ?? current.code,
@@ -242,8 +261,9 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       const normalized = normalizeRecordWrite(merged)
       if (!normalized.ok) fail(normalized.issue)
       const value = normalized.value
-      if (value.client_request_id) {
-        const prior = idempotency.get(value.client_request_id)
+      const nextKey = value.client_request_id
+      if (nextKey) {
+        const prior = idempotency.get(nextKey)
         if (prior && prior.id !== id) {
           throw new TradeJournalError(409, 'DUPLICATE_RECORD', 'client_request_id 已用于不同的交易记录')
         }
@@ -251,11 +271,13 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       const updated = toRecord(id, current.version + 1, value, current.created_at, shanghaiNowIso())
       const next = [...records.values()].map(record => (record.id === id ? updated : record))
       assertBook(next)
-      if (current.client_request_id && current.client_request_id !== value.client_request_id) {
-        idempotency.delete(current.client_request_id)
-      }
-      if (value.client_request_id) {
-        idempotency.set(value.client_request_id, { fingerprint: value.fingerprint, id })
+      // 键不变（未提交，或提交值与当前键相同）时保留创建指纹，不用改后的价格、数量或 trader 重算。
+      // 只有全局还不存在的新键才写入当前快照指纹；旧键留着。改回本记录已有的键时也不覆盖原指纹。
+      // 键改为 null 时释放该记录上的全部键，含历史上换过的键。
+      if (nextKey == null) {
+        releaseRecordKeys(id)
+      } else if (nextKey !== current.client_request_id && !idempotency.has(nextKey)) {
+        idempotency.set(nextKey, { fingerprint: value.fingerprint, id })
       }
       records.set(id, updated)
       return ok(updated)
@@ -273,7 +295,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       const next = [...records.values()].filter(record => record.id !== id)
       assertBook(next)
       records.delete(id)
-      if (current.client_request_id) idempotency.delete(current.client_request_id)
+      releaseRecordKeys(id)
     },
 
     async listReviews(query: ReviewListQuery) {
@@ -376,15 +398,20 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (sortIssue) fail(sortIssue)
       const codeIssue = validateCodeFilter(query.code)
       if (codeIssue) fail(codeIssue)
+      const traderFilter = validateTraderFilter(query.trader)
+      if (traderFilter.issue) fail(traderFilter.issue)
       const asOf = query.as_of ?? shanghaiToday()
-      const included = [...records.values()].filter(record => record.trade_date <= asOf)
+      const included = [...records.values()].filter(record => record.trade_date <= asOf && (traderFilter.trader == null || record.trader === traderFilter.trader))
       const built = buildPortfolio(included, quotesOnOrBefore(asOf))
       if (!built.ok) throw new TradeJournalError(500, 'INTERNAL_ERROR', '持仓计算失败')
       let positions = built.positions
       if (query.code) positions = positions.filter(position => position.code === query.code)
       const sort = query.sort ?? 'symbol_asc'
       positions = [...positions].sort((left, right) => {
-        const tie = left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : left.position_key < right.position_key ? -1 : 1
+        const bySymbol = left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0
+        const byTrader = left.trader < right.trader ? -1 : left.trader > right.trader ? 1 : 0
+        const byKey = left.position_key < right.position_key ? -1 : left.position_key > right.position_key ? 1 : 0
+        const tie = bySymbol || byTrader || byKey
         if (sort === 'symbol_asc') return tie
         const value = sort === 'market_value_desc' ? 'market_value' : 'return_rate'
         const lv = left[value]
@@ -407,7 +434,10 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (sortIssue) fail(sortIssue)
       const codeIssue = validateCodeFilter(query.code)
       if (codeIssue) fail(codeIssue)
-      const built = buildPortfolio([...records.values()], QUOTES)
+      const traderFilter = validateTraderFilter(query.trader)
+      if (traderFilter.issue) fail(traderFilter.issue)
+      const scoped = [...records.values()].filter(record => traderFilter.trader == null || record.trader === traderFilter.trader)
+      const built = buildPortfolio(scoped, QUOTES)
       if (!built.ok) throw new TradeJournalError(500, 'INTERNAL_ERROR', '收益计算失败')
       let rows = built.history
       if (query.from) rows = rows.filter(row => row.close_date >= query.from!)
@@ -428,6 +458,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       body: {
         trade_date: '2026-09-28',
         trade_time: '09:31:00',
+        trader: '杨鹏',
         code: '000001',
         name: '平安银行',
         side: 'buy',
@@ -444,6 +475,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       body: {
         trade_date: '2026-09-28',
         trade_time: '10:05:00',
+        trader: '杨鹏',
         code: '000001',
         name: '平安银行',
         side: 'buy',
@@ -460,6 +492,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       body: {
         trade_date: '2026-10-12',
         trade_time: '14:50:00',
+        trader: '杨鹏',
         code: '000001',
         name: '平安银行',
         side: 'sell',
@@ -476,6 +509,7 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       body: {
         trade_date: '2026-10-12',
         trade_time: '10:35:12',
+        trader: 'AI选股:atr_pct',
         code: '600519',
         name: '贵州茅台',
         side: 'buy',
@@ -499,6 +533,12 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
   }
 
   return api
+
+  function releaseRecordKeys(recordId: string) {
+    for (const [key, entry] of [...idempotency]) {
+      if (entry.id === recordId) idempotency.delete(key)
+    }
+  }
 
   function putRecord(input: { id: string; created_at: string; body: RecordWrite }) {
     const normalized = normalizeRecordWrite(input.body)

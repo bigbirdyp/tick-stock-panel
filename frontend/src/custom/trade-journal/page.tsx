@@ -10,6 +10,7 @@ import { journal } from './client'
 import { isTradeJournalError } from './errors'
 import { RecordForm, ReviewForm } from './forms'
 import { HistoryTable, Pager, PositionTable, RecordTable, ResultState, ReviewListView } from './lists'
+import { TraderTabs } from './traderTabs'
 import type {
   DailyReview,
   HistoryQuery,
@@ -33,6 +34,13 @@ const tabs: { key: Tab; label: string }[] = [
 
 const filterClass = 'h-8 rounded-md border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent'
 
+function withTrader<T extends { trader?: string; offset?: number }>(query: T, trader: string | undefined): T {
+  const next: T = { ...query, offset: 0 }
+  if (trader) next.trader = trader
+  else delete next.trader
+  return next
+}
+
 export function TradeJournalPage() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('positions')
@@ -47,6 +55,10 @@ export function TradeJournalPage() {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
 
+  const traders = useQuery({
+    queryKey: QK.tradeJournalTraders(),
+    queryFn: () => journal.listTraders(),
+  })
   const positions = useQuery({
     queryKey: QK.tradeJournalPositions(JSON.stringify(positionQuery)),
     queryFn: () => journal.currentPositions(positionQuery),
@@ -74,6 +86,7 @@ export function TradeJournalPage() {
     const result = original
       ? await journal.patchRecord(original.id, {
           expected_version: original.version,
+          trader: body.trader,
           trade_date: body.trade_date,
           trade_time: body.trade_time,
           code: body.code,
@@ -134,6 +147,12 @@ export function TradeJournalPage() {
     } finally { setDeleting(false) }
   }
 
+  const selectTrader = (trader: string | undefined) => {
+    setPositionQuery(query => withTrader(query, trader))
+    setHistoryQuery(query => withTrader(query, trader))
+    setRecordQuery(query => withTrader(query, trader))
+  }
+
   const applyCode = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const code = codeInput.trim() || undefined
@@ -182,6 +201,16 @@ export function TradeJournalPage() {
           </div>
 
           <section id="journal-panel" role="tabpanel" aria-labelledby={`journal-tab-${tab}`} className="overflow-hidden rounded-card border border-border bg-surface">
+            {tab !== 'reviews' && (
+              <TraderTabs
+                traders={traders.data?.data.traders ?? []}
+                selected={recordQuery.trader}
+                loading={traders.isPending}
+                error={traders.error}
+                onSelect={selectTrader}
+                onRetry={() => void traders.refetch()}
+              />
+            )}
             <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
               {tab !== 'reviews' && <form onSubmit={applyCode} className="flex items-center gap-2">
                 <input className={filterClass} aria-label="按股票代码筛选" placeholder="股票代码" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={codeInput} onChange={event => setCodeInput(event.target.value)} />
@@ -234,7 +263,7 @@ export function TradeJournalPage() {
         </div>
       </div>
 
-      {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
+      {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={recordEditor === 'new' ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
       {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
       {deletion && <Modal onClose={() => !deleting && setDeletion(null)} ariaLabel="确认删除" panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface p-5 shadow-xl" closeOnBackdrop={!deleting}>
         <div className="space-y-4">

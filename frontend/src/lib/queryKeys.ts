@@ -147,6 +147,7 @@ export const QK = {
 
   // 交易日记 (docs/api.md)。写入后统一失效相关查询。
   tradeJournal:         ['trade-journal'] as const,
+  tradeJournalTraders:  () => ['trade-journal', 'traders'] as const,
   tradeJournalRecords:  (query: string) => ['trade-journal', 'records', query] as const,
   tradeJournalReviews:  (query: string) => ['trade-journal', 'reviews', query] as const,
   tradeJournalPositions:(query: string) => ['trade-journal', 'positions', query] as const,
