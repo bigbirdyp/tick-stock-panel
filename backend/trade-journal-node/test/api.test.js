@@ -244,9 +244,10 @@ test('records/reviews filter, paginate, and sort deterministically with null tra
   assert.deepEqual(desc.body.data.records.map((item) => item.id), [laterNull.body.data.id, a.body.data.id]);
   const filtered = await request('GET', '/api/records?code=000001&side=buy');
   assert.equal(filtered.body.data.pagination.total, 1);
-  const review = await request('POST', '/api/reviews', { date: '2025-01-06', content: '首次复盘', tags: ['观察'] });
+  const review = await request('POST', '/api/reviews', { date: '2025-01-06', trader: '示例', content: '首次复盘', tags: ['观察'] });
   assert.equal(review.status, 201);
-  assert.equal((await request('POST', '/api/reviews', { date: '2025-01-06', content: '重复' })).body.error.code, 'DUPLICATE_REVIEW');
+  assert.equal(review.body.data.trader, '示例');
+  assert.equal((await request('POST', '/api/reviews', { date: '2025-01-06', trader: '示例', content: '重复' })).body.error.code, 'DUPLICATE_REVIEW');
   const id = review.body.data.id;
   assert.equal((await request('GET', '/api/reviews?tag=观察')).body.data.pagination.total, 1);
   assert.equal((await request('GET', `/api/reviews/${id}`)).body.data.content, '首次复盘');
@@ -497,7 +498,7 @@ test('seed command is idempotent and produces current/history/review fixtures', 
     const store = new JournalStore(filePath);
     assert.equal(store.state.records.length, 3);
     assert.equal(store.state.reviews.length, 1);
-    assert.deepEqual(store.listTraders(), { traders: [{ trader: '示例', record_count: 3 }] });
+    assert.deepEqual(store.listTraders(), { traders: [{ trader: '示例', record_count: 3, review_count: 1 }] });
     assert.equal(store.current({ as_of: '2025-01-08', limit: 50, offset: 0, sort: 'symbol_asc' }).positions[0].quantity, 50);
     assert.equal(store.history({ limit: 50, offset: 0, sort: 'close_date_desc' }).history.length, 1);
   } finally {
@@ -604,8 +605,10 @@ test('v1 journal migrates traders and creation fingerprints without rewriting ec
   };
   const { request, store, filePath } = await harness(t, initial);
   const migrated = JSON.parse(readFileSync(filePath, 'utf8'));
-  assert.equal(migrated.schema_version, 2);
-  assert.deepEqual(store.state.reviews, [review]);
+  assert.equal(migrated.schema_version, 3);
+  assert.deepEqual(store.state.reviews, [{ ...review, trader: '未指定' }]);
+  assert.equal(store.state.reviews[0].version, 4);
+  assert.equal(store.state.reviews[0].updated_at, review.updated_at);
   const byId = Object.fromEntries(store.state.records.map((record) => [record.id, record]));
   assert.deepEqual(store.state.records.map((record) => record.id), initial.records.map((record) => record.id));
   assert.equal(byId.rec_yang.trader, '杨鹏');
@@ -631,12 +634,12 @@ test('v1 journal migrates traders and creation fingerprints without rewriting ec
   assert.equal(fingerprint('key-v2'), v2Fingerprint);
   assert.equal(store.state.requests.some((item) => item.key === 'key-orphan'), false);
   const stable = readFileSync(filePath, 'utf8');
-  assert.equal(new JournalStore(filePath).state.schema_version, 2);
+  assert.equal(new JournalStore(filePath).state.schema_version, 3);
   assert.equal(readFileSync(filePath, 'utf8'), stable);
   assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
-    { trader: '未指定', record_count: 4 },
-    { trader: '杨鹏', record_count: 2 },
-    { trader: '示例', record_count: 1 },
+    { trader: '未指定', record_count: 4, review_count: 1 },
+    { trader: '杨鹏', record_count: 2, review_count: 0 },
+    { trader: '示例', record_count: 1, review_count: 0 },
   ]);
 
   const replay = await request('POST', '/api/records', {
@@ -689,9 +692,9 @@ test('trader list uses exact counts and UTF-16 order, and books do not cross tra
   assert.equal(z1.status, 201);
   assert.equal(unspecified.body.data.trader, '未指定');
   assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
-    { trader: 'Z', record_count: 2 },
-    { trader: 'a', record_count: 1 },
-    { trader: '未指定', record_count: 1 },
+    { trader: 'Z', record_count: 2, review_count: 0 },
+    { trader: 'a', record_count: 1, review_count: 0 },
+    { trader: '未指定', record_count: 1, review_count: 0 },
   ]);
   assert.equal((await request('DELETE', `/api/records/${lower.body.data.id}?expected_version=1`)).status, 204);
   assert.deepEqual((await request('GET', '/api/traders')).body.data.traders.map((item) => item.trader), ['Z', '未指定']);
@@ -816,4 +819,182 @@ test('explicit client_request_id null clears legacy mappings even when the curre
     code: '000001', name: '平安银行', fee: 0, client_request_id: 'legacy-key',
   }));
   assert.equal(reused.status, 201);
+});
+
+function legacyReview(fields) {
+  return {
+    tags: [], version: 1,
+    created_at: '2025-01-08T20:00:00+08:00', updated_at: '2025-01-08T20:00:00+08:00',
+    ...fields,
+  };
+}
+
+test('v2 journal migrates review traders once and keeps records and fingerprints', async (t) => {
+  const record = legacyRecord({
+    id: 'rec_v2', trader: '杨鹏', trade_date: '2025-01-06', code: '600519', symbol: '600519.SH',
+    name: '贵州茅台', side: 'buy', price: '10', quantity: 100, client_request_id: 'key-v2',
+  });
+  const fingerprint = JSON.stringify([
+    '杨鹏', '2025-01-06', null, '600519', '600519.SH', '贵州茅台', 'buy', '10', 100, '0', '0', null, 'key-v2',
+  ]);
+  const missing = legacyReview({ id: 'rev_missing', version: 4, date: '2025-01-08', content: '保留复盘', updated_at: '2025-01-08T21:00:00+08:00' });
+  const padded = legacyReview({ id: 'rev_padded', version: 2, trader: '  杨鹏  ', date: '2025-01-08', content: '已有标签' });
+  const blank = legacyReview({ id: 'rev_blank', trader: '   ', date: '2025-01-09', content: '空白' });
+  const tooLong = legacyReview({ id: 'rev_long', version: 7, trader: 'x'.repeat(65), date: '2025-01-10', content: '过长' });
+  const nullTrader = legacyReview({ id: 'rev_null', version: 6, trader: null, date: '2025-01-11', content: '空值' });
+  const named = legacyReview({ id: 'rev_ok', version: 3, trader: '示例', date: '2025-01-09', content: '合法' });
+  const { request, store, filePath } = await harness(t, {
+    schema_version: 2,
+    records: [record],
+    reviews: [missing, padded, blank, tooLong, nullTrader, named],
+    requests: [{ key: 'key-v2', recordId: 'rec_v2', fingerprint }],
+  });
+
+  assert.equal(store.state.schema_version, 3);
+  assert.deepEqual(store.state.records, [record]);
+  assert.deepEqual(store.state.requests, [{ key: 'key-v2', recordId: 'rec_v2', fingerprint }]);
+  assert.deepEqual(store.state.reviews.map((review) => review.id), ['rev_missing', 'rev_padded', 'rev_blank', 'rev_long', 'rev_null', 'rev_ok']);
+  assert.deepEqual(store.state.reviews.map((review) => review.trader), ['未指定', '杨鹏', '未指定', '未指定', '未指定', '示例']);
+  assert.equal(store.state.reviews[0].version, 4);
+  assert.equal(store.state.reviews[0].content, '保留复盘');
+  assert.equal(store.state.reviews[0].updated_at, '2025-01-08T21:00:00+08:00');
+  assert.equal(store.state.reviews[1].version, 2);
+  assert.equal(store.state.reviews[3].version, 7);
+  assert.equal(store.state.reviews[5].content, '合法');
+  const stable = readFileSync(filePath, 'utf8');
+  assert.equal(JSON.parse(stable).schema_version, 3);
+  assert.equal(new JournalStore(filePath).state.schema_version, 3);
+  assert.equal(readFileSync(filePath, 'utf8'), stable);
+
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: '未指定', record_count: 0, review_count: 4 },
+    { trader: '杨鹏', record_count: 1, review_count: 1 },
+    { trader: '示例', record_count: 0, review_count: 1 },
+  ]);
+  const legacy = await request('GET', '/api/reviews?trader=%E6%9C%AA%E6%8C%87%E5%AE%9A&limit=1&offset=0&sort=date_asc');
+  assert.equal(legacy.status, 200);
+  assert.equal(legacy.body.data.pagination.total, 4);
+  assert.equal(legacy.body.data.pagination.has_more, true);
+  assert.equal(legacy.body.data.reviews.length, 1);
+  assert.equal(legacy.body.data.reviews[0].id, 'rev_missing');
+  assert.equal(legacy.body.data.reviews[0].trader, '未指定');
+  const legacyPage = await request('GET', '/api/reviews?trader=%20%E6%9C%AA%E6%8C%87%E5%AE%9A%20&limit=1&offset=3&sort=date_asc');
+  assert.equal(legacyPage.body.data.pagination.total, 4);
+  assert.equal(legacyPage.body.data.reviews[0].id, 'rev_null');
+  const kept = await request('GET', '/api/reviews/rev_ok');
+  assert.equal(kept.body.data.trader, '示例');
+  assert.equal(kept.body.data.version, 3);
+
+  const duplicate = await request('POST', '/api/reviews', { date: '2025-01-08', trader: '  未指定  ', content: '重复旧标签' });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.body.error.code, 'DUPLICATE_REVIEW');
+  const other = await request('POST', '/api/reviews', { date: '2025-01-08', trader: '示例', content: '同日另一人' });
+  assert.equal(other.status, 201);
+  assert.equal(other.body.data.trader, '示例');
+  assert.equal((await request('GET', '/api/reviews/rev_missing')).body.data.version, 4);
+});
+
+test('duplicate review keys abort v1 and v2 migration without rewriting the file', () => {
+  for (const schemaVersion of [1, 2]) {
+    const directory = mkdtempSync(join(tmpdir(), 'trade-journal-test-'));
+    const filePath = join(directory, 'journal.json');
+    try {
+      const initial = {
+        schema_version: schemaVersion,
+        records: [],
+        reviews: [
+          legacyReview({ id: 'rev_a', date: '2025-01-08', content: '甲' }),
+          legacyReview({ id: 'rev_b', version: 2, trader: schemaVersion === 2 ? '未指定' : undefined, date: '2025-01-08', content: '乙' }),
+        ],
+        requests: [],
+      };
+      const originalBytes = JSON.stringify(initial, null, 2) + '\n';
+      writeFileSync(filePath, originalBytes);
+      assert.throws(() => new JournalStore(filePath), /duplicate review date and trader/);
+      assert.equal(readFileSync(filePath, 'utf8'), originalBytes);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('review traders allow the same date, reject patch conflicts, filter before paging, and count reviews apart from records', async (t) => {
+  const { request } = await harness(t);
+  const missingTrader = await request('POST', '/api/reviews', { date: '2026-10-12', content: '缺交易者' });
+  assert.equal(missingTrader.status, 422);
+  assert.equal(missingTrader.body.error.details.fields[0].path, 'trader');
+  assert.equal(missingTrader.body.error.details.fields[0].message, '必填');
+
+  const yangEarly = await request('POST', '/api/reviews', { date: '2026-10-10', trader: '杨鹏', content: '早' });
+  const yangMid = await request('POST', '/api/reviews', { date: '2026-10-11', trader: '  杨鹏  ', content: '中' });
+  const yangLate = await request('POST', '/api/reviews', { date: '2026-10-12', trader: '杨鹏', content: '晚' });
+  const legacy = await request('POST', '/api/reviews', { date: '2026-10-12', trader: '未指定', content: '未指定同日' });
+  const reviewOnly = await request('POST', '/api/reviews', { date: '2026-10-09', trader: '只复盘', content: '只有复盘' });
+  assert.equal(yangEarly.status, 201);
+  assert.equal(yangMid.status, 201);
+  assert.equal(yangMid.body.data.trader, '杨鹏');
+  assert.equal(yangLate.status, 201);
+  assert.equal(legacy.status, 201);
+  assert.equal(reviewOnly.status, 201);
+  const same = await request('POST', '/api/reviews', { date: '2026-10-12', trader: ' 杨鹏 ', content: '重复' });
+  assert.equal(same.status, 409);
+  assert.equal(same.body.error.code, 'DUPLICATE_REVIEW');
+
+  const record = await request('POST', '/api/records', trade({ trader: '杨鹏' }));
+  assert.equal(record.status, 201);
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: '只复盘', record_count: 0, review_count: 1 },
+    { trader: '未指定', record_count: 0, review_count: 1 },
+    { trader: '杨鹏', record_count: 1, review_count: 3 },
+  ]);
+
+  const filtered = await request('GET', '/api/reviews?trader=%20%E6%9D%A8%E9%B9%8F%20&limit=1&offset=0&sort=date_desc');
+  assert.equal(filtered.status, 200);
+  assert.deepEqual(filtered.body.data.pagination, { limit: 1, offset: 0, total: 3, has_more: true });
+  assert.deepEqual(filtered.body.data.reviews.map((item) => item.id), [yangLate.body.data.id]);
+  const lastPage = await request('GET', '/api/reviews?trader=杨鹏&limit=1&offset=2&sort=date_desc');
+  assert.deepEqual(lastPage.body.data.pagination, { limit: 1, offset: 2, total: 3, has_more: false });
+  assert.deepEqual(lastPage.body.data.reviews.map((item) => item.id), [yangEarly.body.data.id]);
+  const unfiltered = await request('GET', '/api/reviews?limit=1&offset=0&sort=date_desc');
+  assert.equal(unfiltered.body.data.pagination.total, 5);
+  assert.equal(unfiltered.body.data.reviews.length, 1);
+  assert.notEqual(unfiltered.body.data.reviews[0].id, yangLate.body.data.id);
+  const empty = await request('GET', '/api/reviews?trader=没有这个人');
+  assert.equal(empty.status, 200);
+  assert.equal(empty.body.data.pagination.total, 0);
+  assert.deepEqual(empty.body.data.reviews, []);
+
+  const legacyId = legacy.body.data.id;
+  const stale = await request('PATCH', `/api/reviews/${legacyId}`, { expected_version: 2, date: '2026-10-12', trader: '杨鹏' });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error.code, 'VERSION_CONFLICT');
+  const clash = await request('PATCH', `/api/reviews/${legacyId}`, { expected_version: 1, date: '2026-10-12', trader: '杨鹏' });
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.error.code, 'DUPLICATE_REVIEW');
+  const unchanged = await request('GET', `/api/reviews/${legacyId}`);
+  assert.equal(unchanged.body.data.version, 1);
+  assert.equal(unchanged.body.data.trader, '未指定');
+  assert.equal(unchanged.body.data.content, '未指定同日');
+  const moved = await request('PATCH', `/api/reviews/${legacyId}`, { expected_version: 1, trader: '  验收乙  ' });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.body.data.version, 2);
+  assert.equal(moved.body.data.trader, '验收乙');
+  assert.equal(moved.body.data.date, '2026-10-12');
+  assert.equal(moved.body.data.created_at, legacy.body.data.created_at);
+  const selfKey = await request('PATCH', `/api/reviews/${legacyId}`, { expected_version: 2, content: '改到空标签' });
+  assert.equal(selfKey.status, 200);
+  assert.equal(selfKey.body.data.version, 3);
+  assert.equal(selfKey.body.data.trader, '验收乙');
+
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: '只复盘', record_count: 0, review_count: 1 },
+    { trader: '杨鹏', record_count: 1, review_count: 3 },
+    { trader: '验收乙', record_count: 0, review_count: 1 },
+  ]);
+  assert.equal((await request('DELETE', `/api/reviews/${reviewOnly.body.data.id}?expected_version=1`)).status, 204);
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: '杨鹏', record_count: 1, review_count: 3 },
+    { trader: '验收乙', record_count: 0, review_count: 1 },
+  ]);
+  assert.equal((await request('GET', `/api/records/${record.body.data.id}`)).body.data.trader, '杨鹏');
 });
