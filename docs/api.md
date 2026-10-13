@@ -1,12 +1,12 @@
 # 股票记录小应用 API（设计契约）
 
-> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/traders`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。
+> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/traders`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。交易记录 `trader`、FIFO 分账和 `schema_version` 2 以当前 Node 为准。每日复盘 `trader`、`(date, trader)` 唯一性、`review_count` 和 `schema_version` 3 以本文 §4 与 §8.4 为准；后端按该契约改完之前，正在运行的进程仍可能按「复盘无 `trader`、同一日期全局一条、交易者列表只计 `record_count`」工作。
 >
 > 范围：交易记录、交易者标签统计、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。不新增选股类资源。
 
-本文档约定 HTTP JSON 契约与计算口径。本地 Node/Vite 路径以当前实现为准；生产边界未落地前，不得把本机直连 Node 当作可对外暴露的认证边界。
+本文档约定 HTTP JSON 契约与计算口径。交易记录和持仓的已实现行为以当前 Node 为准；复盘 `trader` 以本文为准，不把旧的「按日期全局唯一」继续当作目标行为。生产边界未落地前，不得把本机直连 Node 当作可对外暴露的认证边界。
 
-持久化实现说明（契约口径，非 SQL）：本地 Node 将状态原子写入 JSON 文件 `backend/trade-journal-node/.data/journal.json`。磁盘形态为顶层 `schema_version`、`records`、`reviews`、`requests`。本文定义的 `trader` 字段与 FIFO 分账规则属于该 JSON 状态机的契约；迁移规则见 §8。
+持久化实现说明（契约口径，非 SQL）：本地 Node 将状态原子写入 JSON 文件 `backend/trade-journal-node/.data/journal.json`。磁盘形态为顶层 `schema_version`、`records`、`reviews`、`requests`。没有复盘表，也没有 `trader` 列；`trader` 是 `records[]` 与 `reviews[]` 元素上的字符串字段。FIFO 分账只作用于交易记录。迁移规则见 §8。
 
 ## 1. 服务边界
 
@@ -136,7 +136,7 @@
 | `403` | `FORBIDDEN` | 已认证但无权访问该本地记录本 |
 | `404` | `NOT_FOUND` | 指定 `id` 不存在或已被删除 |
 | `409` | `DUPLICATE_RECORD` | `client_request_id` 与已存在记录冲突 |
-| `409` | `DUPLICATE_REVIEW` | 同一日期已存在每日复盘 |
+| `409` | `DUPLICATE_REVIEW` | 另一条复盘已占用同一个 `(date, trader)`；同一日期、不同交易者允许并存 |
 | `409` | `INSUFFICIENT_POSITION` | 卖出、修改或删除会导致指定 `(trader, symbol)` 账本持仓为负 |
 | `409` | `VERSION_CONFLICT` | `expected_version` 与当前资源版本不一致 |
 | `409` | `CONFLICT` | 资源状态与本次修改冲突但不属于上述专用码 |
@@ -165,12 +165,12 @@
 | 规则 | 要求 |
 | --- | --- |
 | JSON 类型 | 必须是 JSON string；`null`、number、boolean、object、array 均返回 `422 VALIDATION_ERROR`，`details.fields[].path` 为 `trader` |
-| 必填（写入） | `POST /api/records` 必须包含 `trader`；缺失返回 `422`，`message` 指出必填 |
+| 必填（写入） | `POST /api/records` 与 `POST /api/reviews` 必须包含 `trader`；缺失返回 `422 VALIDATION_ERROR`，`details.fields[].path` 为 `trader`，字段 `message` 为 `必填`。新建不得缺省成 `未指定` |
 | Trim | 写入与查询过滤均先按 ECMAScript `String.prototype.trim`（Unicode 空白）去掉首尾空白，再校验与比较；持久化与响应中的 `trader` 为 trim 后的值 |
 | 空白 | trim 后长度为 `0`（空串或仅空白）→ `422 VALIDATION_ERROR` |
 | 长度 | trim 后长度必须为 `1` 到 `64`（与 `name` 相同：按 JavaScript 字符串 `.length` / UTF-16 code unit 计数）；超出 → `422` |
 | 内容 | 允许 Unicode 文本（含中文、冒号等），例如 `AI选股:atr_pct`、`杨鹏`；不在服务端解释标签语义 |
-| 查询过滤 | `GET` 上可选的 `?trader=` 若出现，必须通过上表类型/trim/空白/长度规则；合法但当前无任何记录使用该标签 → 空列表（`total: 0`），不是 `404` |
+| 查询过滤 | `GET /api/records`、`GET /api/positions/current`、`GET /api/positions/history`、`GET /api/reviews` 上的 `?trader=` 可选。参数缺省表示该接口不过滤交易者。参数出现时先 trim，再套用空白和长度规则；查询值本身是字符串。重复出现该参数 → `422`。比较是 trim 之后的精确相等，不是前缀或忽略大小写。先按该条件过滤，再计算 `total` 和应用分页。合法但本资源集合没有匹配 → 空列表（`total: 0`），不是 `404`。持仓接口只匹配记录账本；复盘接口只匹配复盘 |
 | 不是身份 | 不得映射为 `user_id`；不得因 `trader` 不同而返回 `401`/`403` |
 
 ## 3. 交易记录资源
@@ -439,15 +439,29 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 - 从 `records` 硬删除该行（无 tombstone）。
 - 删除所有 `recordId` 指向该记录的 `requests` 条目，从而释放其 `client_request_id`。
-- `reviews` 与其他记录的 `id`/`version`/`client_request_id` 不变。
-- 若该 `trader` 下已无剩余记录，后续 `GET /api/traders` 不再列出该标签。
+- `reviews` 与其他记录的 `id`/`version`/`client_request_id` 不变。删除记录不修改复盘的 `trader`。
+- 若删除后该标签的 `record_count` 与 `review_count` 都为 0，后续 `GET /api/traders` 不再列出它。若该标签仍有复盘，条目保留，`record_count` 为 `0`，`review_count` ≥ 1。
 - 派生当前持仓与历史收益按剩余记录重算；已删除卖出对应的历史行不再出现。
 
 ### 3.7 交易者列表：GET /api/traders
 
-返回当前 `records` 中**实际出现过**的去重 `trader` 标签及其记录条数。本接口**豁免分页**：不接受 `limit`/`offset`/`sort` 或任何其他查询参数；传入不支持的查询参数返回 `422 VALIDATION_ERROR`。无 `meta`。
+返回 `records` 与 `reviews` 中**实际出现过**的 `trader` 标签并集。同一个标签只出现一次。本接口**豁免分页**：不接受 `limit`/`offset`/`sort`、`trader` 或任何其他查询参数；传入不支持的查询参数返回 `422 VALIDATION_ERROR`。无 `meta`。
 
-响应 envelope：
+两个计数分开，都是未删除资源的条数：
+
+- `record_count`：该标签下的交易记录条数，可以为 `0`。
+- `review_count`：该标签下的每日复盘条数，可以为 `0`。
+
+二者都是大于等于 `0` 的整数，且不能同时为 `0`。标签只来自现存记录或复盘；不预置从未出现的标签。`records` 与 `reviews` 都为空时，`traders` 为空数组。只有复盘、没有记录的标签仍然列出，此时 `record_count` 为 `0`。只有记录、没有复盘的标签仍然列出，此时 `review_count` 为 `0`。
+
+删除效果：
+
+- 删光某标签的记录后，若其 `review_count` 仍 ≥ 1，条目保留且 `record_count` 为 `0`。
+- 删光某标签的复盘后，若其 `record_count` 仍 ≥ 1，条目保留且 `review_count` 为 `0`。
+- 两个计数都变成 `0` 时，该标签从列表消失。
+- 新建一条该标签此前不存在的复盘或记录后，标签出现；另一侧计数为 `0`。
+
+响应 envelope（顺序是标签的 UTF-16 code unit 升序，不是记录数序）：
 
 ```json
 {
@@ -455,32 +469,45 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
     "traders": [
       {
         "trader": "AI选股:atr_pct",
-        "record_count": 3
-      },
-      {
-        "trader": "杨鹏",
-        "record_count": 2
+        "record_count": 3,
+        "review_count": 1
       },
       {
         "trader": "未指定",
-        "record_count": 1
+        "record_count": 1,
+        "review_count": 2
+      },
+      {
+        "trader": "李四",
+        "record_count": 0,
+        "review_count": 1
+      },
+      {
+        "trader": "杨鹏",
+        "record_count": 2,
+        "review_count": 0
       }
     ]
   }
 }
 ```
 
+上例里 `未指定`（U+672A）在 `李四`（U+674E）和 `杨鹏`（U+6768）之前，因为比较的是码元而不是拼音或笔画。`AI选股:atr_pct` 以 `A`（U+0041）开头，排在三者之前。
+
 字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `traders` | array | 去重后的交易者条目列表 |
+| `traders` | array | 记录与复盘标签的并集 |
 | `traders[].trader` | string | 标签字面量（已 trim） |
-| `traders[].record_count` | integer | 该标签下未删除的交易记录条数，`>= 1` |
+| `traders[].record_count` | integer | 该标签下未删除的交易记录条数，`>= 0` |
+| `traders[].review_count` | integer | 该标签下未删除的每日复盘条数，`>= 0` |
 
 稳定顺序：按 `trader` 标签字符串做升序排序。比较口径为 JavaScript 字符串的**原始 UTF-16 code unit 序**：对标签数组使用默认 `.sort()`（无 compareFunction），或等价比较器 `a < b` / `a > b`。**不得**使用 `String.prototype.localeCompare`（即使不传 locale 也不等价于 code-unit 序，例如 `'a'` 与 `'Z'`）。全程同一口径，相同标签只出现一次。持仓等列表中作为排序键的字符串字段（如 §7.1 的 `symbol` / `trader` / `position_key`）采用同一 code-unit 升序规则。
 
-空结果（无任何交易记录）：
+本接口不按 `record_count` 或 `review_count` 排序。交易员页签若要按记录数从多到少展示，由客户端自行排序；记录数相同的次序也由客户端决定。
+
+空结果（没有任何交易记录，也没有任何复盘）：
 
 ```json
 {
@@ -490,7 +517,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 }
 ```
 
-不返回 `404`。本接口只统计交易记录，不统计复盘，也不预置未使用过的标签。
+不返回 `404`。
 
 ## 4. 每日复盘资源
 
@@ -500,29 +527,43 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | --- | --- | --- | --- | --- |
 | `id` | string | 响应必有 | 否 | 稳定复盘 ID，例如 `rev_01HZY9QX6M5X7ER2DK2H9K6B8V` |
 | `version` | integer | 响应必有 | 否 | 资源版本，从 `1` 开始，每次成功修改递增 |
+| `trader` | string | 是 | 否 | 交易者标签；校验见 §2.8。持久化和响应中的值都是 trim 之后的字符串 |
 | `date` | string | 是 | 否 | 复盘日期，`YYYY-MM-DD` |
 | `content` | string | 是 | 否 | 复盘正文，1 到 20000 个字符 |
 | `tags` | string[] | 否 | 否 | 标签列表，默认 `[]`；每个标签 1 到 30 个字符，最多 20 个 |
 | `created_at` | string | 响应必有 | 否 | 创建时间戳 |
 | `updated_at` | string | 响应必有 | 否 | 最近更新时间戳 |
 
-同一 `date` 只允许一条每日复盘。需要修改正文时使用 `PATCH /api/reviews/{id}`。复盘资源不包含 `trader`，也不按交易者过滤。
+唯一键是 `(date, trader)`，比较的 `trader` 是 trim 之后的值。同一日期、同一交易者只允许一条复盘。同一日期、不同交易者可以各有一条。复盘不参与 §6 的 FIFO 账本。修改正文、日期或交易者时使用 `PATCH /api/reviews/{id}`。
 
 ### 4.2 创建复盘：POST /api/reviews
 
-成功创建返回 `201`。同一日期已存在复盘时返回 `409 DUPLICATE_REVIEW`。
+成功创建返回 `201`。请求体必须包含 `trader`、`date`、`content`。`trader` 按 §2.8 规范化后写入。缺失、空白或非法的 `trader` 返回 `422 VALIDATION_ERROR`，不得默认为 `未指定`。
+
+`trader` 的 `422` 字段消息与交易记录相同：缺失为 `必填`；JSON 类型不是 string 为 `必须是字符串`；trim 后长度为 0 为 `不能为空白`；trim 后长度超出 1 到 64 为 `长度必须为 1 到 64 个字符`。`null`、number、boolean、object、array 都算类型错误。
+
+唯一性：规范化后的 `(date, trader)` 已被另一条复盘占用时返回 `409 DUPLICATE_REVIEW`，不创建。同一 `date` 配不同 `trader` 返回 `201`。本接口没有 `expected_version`，也没有 `client_request_id` 幂等。
+
+错误优先顺序（先命中者返回，不继续）：
+
+1. JSON 语法错误或 `Content-Type` 不支持 → `400 BAD_REQUEST`。
+2. 请求体不是 JSON 对象，或含有 `date`、`content`、`tags`、`trader` 以外的字段 → `422 VALIDATION_ERROR`。
+3. 缺少必填字段时按 `date`、`content`、`trader` 的顺序返回第一处 `422`。因此日期和交易者都缺时，`path` 仍是 `date`。
+4. 再校验字段格式：`date`、`content`、`tags`、`trader`。
+5. 与另一条复盘的 `(date, trader)` 冲突 → `409 DUPLICATE_REVIEW`。
 
 请求示例：
 
 ```json
 {
   "date": "2026-10-12",
+  "trader": "  杨鹏  ",
   "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
   "tags": ["缩量", "题材分歧", "等待确认"]
 }
 ```
 
-响应示例：
+响应示例（`trader` 已 trim）：
 
 ```json
 {
@@ -530,10 +571,51 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
     "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8V",
     "version": 1,
     "date": "2026-10-12",
+    "trader": "杨鹏",
     "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
     "tags": ["缩量", "题材分歧", "等待确认"],
     "created_at": "2026-10-12T20:20:00+08:00",
     "updated_at": "2026-10-12T20:20:00+08:00"
+  }
+}
+```
+
+同一天为另一名交易者再创建一条，仍然 `201`：
+
+```json
+{
+  "date": "2026-10-12",
+  "trader": "未指定",
+  "content": "迁移前的市场复盘留在未指定名下。"
+}
+```
+
+再次 `POST` 日期 `2026-10-12` 且 `trader` 为 `杨鹏`（或 trim 后等于 `杨鹏`）时：
+
+```json
+{
+  "error": {
+    "code": "DUPLICATE_REVIEW",
+    "message": "该日期下该交易者已有每日复盘"
+  }
+}
+```
+
+缺少 `trader` 时：
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "请求字段校验失败",
+    "details": {
+      "fields": [
+        {
+          "path": "trader",
+          "message": "必填"
+        }
+      ]
+    }
   }
 }
 ```
@@ -544,6 +626,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `trader` | string | 否 | 精确匹配 trim 后的交易者标签。参数缺省时返回全部交易者的复盘 |
 | `date` | string | 否 | 等于某个复盘日期 |
 | `from` | string | 否 | 起始日期，包含 |
 | `to` | string | 否 | 结束日期，包含 |
@@ -552,12 +635,30 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 | `offset` | integer | 否 | 默认 `0` |
 | `sort` | string | 否 | `date_desc` 或 `date_asc`，默认 `date_desc` |
 
+`trader` 与其他条件是逻辑与。过滤在排序和分页之前完成：`pagination.total` 是过滤后的条数，然后才按 `offset`/`limit` 切片。
+
+参数校验沿用列表查询的既有顺序，命中即返回：
+
+1. 不支持的参数，或同一个参数重复出现 → `422 VALIDATION_ERROR`。
+2. `date`、`from`、`to` 格式不合法 → `422`。
+3. `from > to` → `422 INVALID_DATE`。这一步早于 `trader` 长度校验。
+4. `trader` 出现时按 §2.8 做 trim、空白和长度校验。`?trader=`、`?trader=%20` 以及 trim 后超过 64 个 UTF-16 code unit → `422`。通过校验但没有任何复盘使用该标签 → `200`，`reviews: []`，`total: 0`，不是 `404`。
+5. 再校验 `tag`、`limit`、`offset`、`sort`。
+
+示例：
+
+- `GET /api/reviews`：不带 `trader`，返回全部复盘。
+- `GET /api/reviews?trader=%E6%9D%A8%E9%B9%8F`：只返回 `trader === "杨鹏"` 的复盘。
+- `GET /api/reviews?trader=%20%E6%9D%A8%E9%B9%8F%20`：查询值先 trim，结果与上一行相同。
+- `GET /api/reviews?trader=%E6%B2%A1%E6%9C%89%E8%BF%99%E4%B8%AA%E4%BA%BA`：标签合法但没有复盘，空列表。
+- `GET /api/reviews?date=2026-10-12&trader=%E6%9C%AA%E6%8C%87%E5%AE%9A`：该日期下 `未指定` 的那一条；没有则为空列表。
+
 排序规则：
 
 - `date_desc`：`date desc, created_at desc, id desc`。
 - `date_asc`：`date asc, created_at asc, id asc`。
 
-响应示例：
+`GET /api/reviews?trader=杨鹏` 的响应示例：
 
 ```json
 {
@@ -567,6 +668,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
         "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8V",
         "version": 1,
         "date": "2026-10-12",
+        "trader": "杨鹏",
         "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
         "tags": ["缩量", "题材分歧", "等待确认"],
         "created_at": "2026-10-12T20:20:00+08:00",
@@ -583,11 +685,107 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 }
 ```
 
+不带 `trader` 时，同一天的另一名交易者也会出现。下面两条的 `date` 相同，唯一键仍然不同：
+
+```json
+{
+  "data": {
+    "reviews": [
+      {
+        "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8V",
+        "version": 1,
+        "date": "2026-10-12",
+        "trader": "杨鹏",
+        "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
+        "tags": ["缩量", "题材分歧", "等待确认"],
+        "created_at": "2026-10-12T20:21:00+08:00",
+        "updated_at": "2026-10-12T20:21:00+08:00"
+      },
+      {
+        "id": "rev_01HZY9QX6M5X7ER2DK2H9K6B8W",
+        "version": 1,
+        "date": "2026-10-12",
+        "trader": "未指定",
+        "content": "迁移前的市场复盘留在未指定名下。",
+        "tags": [],
+        "created_at": "2026-10-12T20:20:00+08:00",
+        "updated_at": "2026-10-12T20:20:00+08:00"
+      }
+    ],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 2,
+      "has_more": false
+    }
+  }
+}
+```
+
+合法但无匹配的标签：
+
+```json
+{
+  "data": {
+    "reviews": [],
+    "pagination": {
+      "limit": 50,
+      "offset": 0,
+      "total": 0,
+      "has_more": false
+    }
+  }
+}
+```
+
 ### 4.4 查询、修改和删除单条复盘
 
-- `GET /api/reviews/{id}`：按 ID 查询复盘，不存在时返回 `404 NOT_FOUND`。
-- `PATCH /api/reviews/{id}`：可修改 `date`、`content`、`tags`，请求体必须包含 `expected_version`。若新 `date` 与另一条复盘冲突，返回 `409 DUPLICATE_REVIEW`；若版本不匹配，返回 `409 VERSION_CONFLICT`。
-- `DELETE /api/reviews/{id}?expected_version=1`：删除复盘。成功返回 `204` 且无响应体；版本不匹配时返回 `409 VERSION_CONFLICT`。硬删除，无 tombstone。
+- `GET /api/reviews/{id}`：按 ID 查询完整 `DailyReview`（含 `trader`）。不存在时返回 `404 NOT_FOUND`。此路径不按 `trader` 过滤。
+- `PATCH /api/reviews/{id}`：可修改 `trader`、`date`、`content`、`tags`。至少提交一个可写字段，并且必须提交 `expected_version`。`expected_version` 只做并发检查，不写入资源。`id`、`version`、`created_at`、`updated_at` 不能由客户端修改。未提交的 `trader` 保持原值。提交了 `trader` 时必须通过 §2.8，持久化为 trim 后的值，不能写成 `null` 或空白。
+- `DELETE /api/reviews/{id}?expected_version=1`：删除复盘。成功返回 `204` 且无响应体。硬删除，无 tombstone。删除接口不接受 `trader`；除单个 `expected_version` 以外的查询参数仍返回 `422 VALIDATION_ERROR`。
+
+`PATCH` 与 `DELETE` 保留现有 `expected_version` 优先顺序。先命中者返回：
+
+1. JSON 语法错误或 `Content-Type` 不支持 → `400 BAD_REQUEST`（仅 `PATCH`）。
+2. `PATCH` 请求体不是对象，或含有未知字段 → `422`。`DELETE` 的查询参数不合法或 `expected_version` 重复 → `422`。
+3. 缺少 `expected_version` → `428 PRECONDITION_REQUIRED`。这一步早于 `trader`、`date`、`content`、`tags` 的格式校验，也早于 `404`。
+4. `PATCH` 除 `expected_version` 外没有可写字段 → `422`。`expected_version` 不是从 `1` 开始的整数 → `422`。
+5. 其余字段格式，包括 `trader`，不合法 → `422`。
+6. 校验通过后才按 ID 查找。资源不存在 → `404 NOT_FOUND`。
+7. 资源存在但 `expected_version` 与当前 `version` 不一致 → `409 VERSION_CONFLICT`。不得写入。此时即使修改后的 `(date, trader)` 会撞车，也仍然返回 `VERSION_CONFLICT`，不返回 `DUPLICATE_REVIEW`。
+8. 版本匹配后，只拿**写入之后**的 `(date, trader)` 与其他复盘比较。未改动的那一侧沿用当前值。与自己原来的键相同不是冲突。与另一条复盘冲突 → `409 DUPLICATE_REVIEW`，整笔不提交，`version` 不递增。
+
+成功的 `PATCH` 返回 `200` 和完整复盘，`version` 加 1，`updated_at` 更新，`created_at` 不变。
+
+只改正文（交易者不变）：
+
+```json
+{
+  "expected_version": 1,
+  "content": "修订后的复盘"
+}
+```
+
+把交易者改到尚未占用该日期的标签：
+
+```json
+{
+  "expected_version": 2,
+  "trader": "验收乙-20261013"
+}
+```
+
+若 `2026-10-12` 已经有 `杨鹏` 的另一条复盘，则下面的请求在版本匹配时返回 `409 DUPLICATE_REVIEW`：
+
+```json
+{
+  "expected_version": 2,
+  "date": "2026-10-12",
+  "trader": "杨鹏"
+}
+```
+
+同一日期改给另一个还没有复盘的交易者则成功。删除成功后，该复盘的 `review_count` 减 1；若该标签因此两个计数都为 0，`GET /api/traders` 不再列出它。删除复盘不修改交易记录。
 
 ## 5. 行情价格字段
 
@@ -861,7 +1059,8 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 ### 8.1 磁盘状态
 
 - 权威文件：`backend/trade-journal-node/.data/journal.json`（路径可配置，但语义不变）。
-- 顶层字段：`schema_version`（integer）、`records`（array）、`reviews`（array）、`requests`（array）。
+- 顶层字段：`schema_version`（integer）、`records`（array）、`reviews`（array）、`requests`（array）。没有单独的复盘表。
+- 目标 `schema_version` 为 `3`。`1` 表示交易记录仍可能没有合法 `trader`。`2` 表示 §8.2 的记录迁移已完成，复盘仍可能没有 `trader`。`3` 表示复盘也已按 §8.4 处理。`requests[].fingerprint` 的「v2 十三元组」与顶层 `schema_version` 不是同一个计数。
 - `requests` 元素至少包含：`key`（即 `client_request_id` 字符串）、`recordId`、`fingerprint`（规范化体序列化）。
 - 写入必须原子：写入临时文件 → `fsync` → `rename` 覆盖目标（与现有 Node 实现一致）。迁移与普通业务写共享同一原子提交边界；不得出现只写了一半记录的可见中间态。
 
@@ -876,7 +1075,7 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
 
 1. 对每条需要修复的记录：设置 `trader` 为字面量 `未指定`（U+672A U+6307 U+5B9A）。**不**修改 `id`、`version`、`created_at`、`updated_at` 或其他业务字段（含已 PATCH 过的价格/数量等）。
 2. 已具备合法非空 `trader` 的记录保持原值。
-3. `reviews` 数组原样保留（含全部 `id`/版本/内容/时间戳）。
+3. 本步骤不改写复盘的 `id`、`version`、`content`、`tags`、`created_at`、`updated_at`，也不在本步骤给复盘写入 `trader`。旧文「复盘原样保留」和「迁移不改变复盘」只描述记录迁移这一步，不表示复盘资源永远没有 `trader`。复盘标签由 §8.4 写入。
 4. `requests`（指纹升级，键不变）：
    - **保留**每条的 `key` 与 `recordId`（旧键字面量完全不动：不改名、不加 trader 前缀、不改写成 §9 的 `seed2:` 形式）。
    - 解析已存储的 `fingerprint`：若 JSON 解析后为**长度为 12** 的数组（v1），则取该 `recordId` 对应记录在本迁移步骤中确定的 `trader`——对缺省/非法而被回填的记录为 `未指定`，对迁移前已具备合法标签的记录为**该既有标签**（例如 `杨鹏`）——将其 **prepend 为元素 0**，得到 13 元 v2 数组后再 `JSON.stringify` 写回。**不得**用当前记录的 `price`/`quantity`/其他经济字段重算这十二个元素——它们必须来自已存储的 v1 指纹本身（即创建时 payload）。幂等重放 POST 必须使用**同一前置标签**（与指纹元素 0 一致）加上原始十二个经济字段，才能命中 `200` + `duplicate: true`（响应为当前记录）。之后对该记录的 PATCH（含改 `trader`）**不得**回写或改写该创建指纹中的标签。
@@ -884,16 +1083,39 @@ DELETE /api/records/rec_01HZY9K0V8J6K7Y2VQ4B6N9M3C?expected_version=1
    - **孤儿**（`recordId` 在 `records` 中无对应行）：可按既有硬删除语义删除该 `requests` 条目并释放键。
    - **损坏但指向活记录**：若 `recordId` 仍指向一条现存记录，但 `fingerprint` 无法解析为长度为 12 或 13 的数组，则**不得**删除该映射；在同一次原子迁移中原样保留其 `key`、`recordId` 与原始 `fingerprint` 字符串不变。之后任何 POST 复用该键都必须返回 `409 DUPLICATE_RECORD`，不得再创建另一笔交易。
    - 不得半写：要么整次迁移原子成功并可见，要么对外不暴露中间态。
-5. 将 `schema_version` 设为 `2`。
-6. 原子写回磁盘。若写失败，内存不得对外服务半迁移状态；下次加载重试同一确定性步骤。
+5. 记录侧完成后，指纹按上面的规则成为 v2 十三元组。若同一次加载还要执行 §8.4，不得把 `schema_version: 2` 且复盘仍无 `trader` 的中间文件当成成功结果留下。与 §8.4 合成同一次原子写，最终 `schema_version` 为 `3`。磁盘上已经是 `2` 的文件不重做已完成的 13 元指纹升级，只执行 §8.4。
+6. 成功时的那一次原子写由 §8.4 描述，顶层版本是 `3`。若写失败，内存不得对外服务半迁移状态；下次加载重试同一确定性步骤。rename 成功前，已有文件保持原字节。
 
-迁移不重新分配记录 ID，不递增 `version`，不改变复盘与时间戳，不发明选股资源。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止。仅**缺失或非法** `trader` 的行被回填为 `未指定` 并落入该标签的账本；迁移前已具备合法标签的行保留各自的 `(trader, symbol)` FIFO 账本、记录字段、持仓/历史过滤与幂等重放标签。若旧 v1 状态中**没有任何**行带有合法 `trader`，则全部行成为 `未指定`，此时原全局 FIFO 数值结果保持不变。
+迁移不重新分配记录 ID，不递增记录 `version`，不发明选股资源。本步骤不改复盘的 `id`、`version`、正文、标签和时间戳。复盘 `trader` 只在 §8.4 补齐，该步骤同样不改这些字段。迁移后 FIFO 按 `(trader, symbol)` 重放；原先按全局 `symbol` 混撮的旧口径在文档与实现上废止。仅**缺失或非法** `trader` 的记录被回填为 `未指定` 并落入该标签的账本；迁移前已具备合法标签的记录保留各自的 `(trader, symbol)` FIFO 账本、记录字段、持仓/历史过滤与幂等重放标签。若旧 v1 状态中**没有任何**记录带有合法 `trader`，则全部记录成为 `未指定`，此时原全局 FIFO 数值结果保持不变。不得据此把已有合法 `trader` 的复盘改写成 `未指定`。
 
 ### 8.3 迁移后的客户端行为
 
 - 新建记录必须显式传 `trader`；不能省略以期望得到 `未指定`。
+- 新建复盘同样必须显式传 `trader`；不能省略以期望得到 `未指定`。
 - 若需继续向被回填为 `未指定` 的迁移记录追加买卖，应使用 `trader: "未指定"`；对迁移前已保留合法标签的记录，继续使用该标签。也可先 `PATCH` 改标签并接受旧/新账本重校验。
+- 被回填为 `未指定` 的旧复盘仍用该标签读取和修改。`PATCH` 可以改成其他标签；目标 `(date, trader)` 已被占用时返回 `409 DUPLICATE_REVIEW`。
 - `client_request_id` 仍为全局唯一、最长 80；跨 `trader` 复用同一请求 ID 会 `409`。历史键字面量在迁移中保持不变（见上）；新的跨 trader 导入键见 §9。
+
+### 8.4 复盘 trader：schema_version 2 迁到 3
+
+本步骤只处理 `reviews[]`。不修改 `records`，不修改 `requests` 的 `key`、`recordId` 或 `fingerprint`，不创建 SQL 表。加载 `schema_version` 为 `1`、`2` 或 `3` 时都执行下面的判定。其他 `schema_version` 拒绝加载，不改写文件，也不对外服务。
+
+对每条复盘，用与 §2.8 相同的规则看 `trader`（trim，长度按 UTF-16 code unit）：
+
+- 缺字段、`null`、非字符串、trim 后长度为 0，或 trim 后长度大于 64：改为字面量 `未指定`（U+672A U+6307 U+5B9A）。
+- trim 后长度为 1 到 64：保留 trim 后的标签。`  杨鹏  ` 变成 `杨鹏`，不得改成 `未指定`。已经是合法标签的复盘保持该标签。
+
+每条复盘的 `id`、`version`、`date`、`content`、`tags`、`created_at`、`updated_at` 保持原值。`reviews` 的数组顺序保持原顺序。不因为补了 `trader` 而递增 `version`。
+
+判定之后若两条复盘的 `(date, trader)` 相同，迁移失败。常见情况是同一日期有两条都缺少合法 `trader`，回填后都会变成 `未指定`。失败时不得删掉其中一条来凑唯一键，不得写入新文件，不得把半迁移状态提供给请求。已有文件保持原字节。这是加载失败，不是 HTTP `409 DUPLICATE_REVIEW`。`DUPLICATE_REVIEW` 只用于迁移完成之后的 `POST` 和 `PATCH`。旧数据若本来就是每个日期一条复盘，则全部回填为 `未指定` 后仍然满足唯一键。同一日期上已经有合法 `trader` 的复盘，与另一条回填为 `未指定` 的复盘可以同时保留。
+
+写入规则：
+
+- `schema_version` 为 `1` 或 `2`：先得到 §8.2 的记录结果（`2` 且记录与指纹都已符合时，该步不改记录），再得到本节的复盘结果，然后**一次**原子写回，`schema_version` 为 `3`。`reviews` 为空也要写成 `3`。
+- `schema_version` 已是 `3`，且本节与 §8.2 都没有发现需要改的字段：不写磁盘。
+- `schema_version` 已是 `3`，但仍有复盘（或记录）需要按上述规则修复：修复后原子写回，`schema_version` 仍为 `3`。
+- 对同一文件连续加载两次，第二次必须得到与第一次成功写回后相同的 `reviews`，并且不再改 `id`、`version` 和时间戳。无差异时第二次不写。
+- 写失败时内存状态不得对外服务；下次加载从头做同一判定。
 
 ## 9. seed-picks 导入器契约（客户端约定）
 
