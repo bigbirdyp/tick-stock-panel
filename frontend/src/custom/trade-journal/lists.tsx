@@ -133,10 +133,13 @@ export function ReviewListView({ rows, onEdit, onDelete }: { rows: DailyReview[]
   return <div className="divide-y divide-border/70">{rows.map(row => (
     <article key={row.id} className="p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <div><h3 className="font-medium text-foreground">{row.date}</h3><span className="text-[11px] text-muted">版本 {row.version}</span></div>
+        <div>
+          <h3 className="font-medium text-foreground">{row.date}</h3>
+          <span className="text-[11px] text-muted">{traderLabel(row.trader)} · 版本 {row.version}</span>
+        </div>
         <div className="flex gap-1">
-          <button type="button" aria-label={`编辑 ${row.date} 复盘`} onClick={() => onEdit(row)} className="rounded-btn p-1.5 text-secondary hover:bg-elevated"><Pencil className="h-3.5 w-3.5" /></button>
-          <button type="button" aria-label={`删除 ${row.date} 复盘`} onClick={() => onDelete(row)} className="rounded-btn p-1.5 text-danger hover:bg-danger/10"><Trash2 className="h-3.5 w-3.5" /></button>
+          <button type="button" aria-label={`编辑 ${row.trader} ${row.date} 复盘`} onClick={() => onEdit(row)} className="rounded-btn p-1.5 text-secondary hover:bg-elevated"><Pencil className="h-3.5 w-3.5" /></button>
+          <button type="button" aria-label={`删除 ${row.trader} ${row.date} 复盘`} onClick={() => onDelete(row)} className="rounded-btn p-1.5 text-danger hover:bg-danger/10"><Trash2 className="h-3.5 w-3.5" /></button>
         </div>
       </div>
       <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-secondary">{row.content}</p>
