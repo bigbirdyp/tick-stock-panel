@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,9 +13,10 @@ import { recordInput } from '../src/validation.js';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
-async function harness(t) {
+async function harness(t, initialState) {
   const directory = mkdtempSync(join(tmpdir(), 'trade-journal-test-'));
   const filePath = join(directory, 'journal.json');
+  if (initialState !== undefined) writeFileSync(filePath, JSON.stringify(initialState));
   const store = new JournalStore(filePath);
   const server = createApp(store);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -42,6 +43,7 @@ async function harness(t) {
 }
 
 const trade = (overrides = {}) => ({
+  trader: '示例',
   trade_date: '2025-01-06', code: '600519', name: '贵州茅台', side: 'buy', price: 10,
   quantity: 100, fee: 5, ...overrides,
 });
@@ -69,6 +71,15 @@ test('rejects malformed JSON, unsupported media, invalid dates/codes, and out-of
   assert.equal(fractional.body.error.details.fields[0].path, 'price');
   const identity = await request('POST', '/api/records', trade({ owner_id: 'someone' }));
   assert.equal(identity.body.error.code, 'VALIDATION_ERROR');
+  const missingTrader = await request('POST', '/api/records', {
+    trade_date: '2025-01-06', code: '600519', name: '贵州茅台', side: 'buy', price: 10, quantity: 100,
+  });
+  assert.equal(missingTrader.status, 422);
+  assert.equal(missingTrader.body.error.details.fields[0].path, 'trader');
+  assert.equal(missingTrader.body.error.details.fields[0].message, '必填');
+  const blankTrader = await request('POST', '/api/records', trade({ trader: ' \n ' }));
+  assert.equal(blankTrader.status, 422);
+  assert.equal(blankTrader.body.error.details.fields[0].path, 'trader');
   const dates = await request('GET', '/api/reviews?from=2025-02-01&to=2025-01-01');
   assert.equal(dates.body.error.code, 'INVALID_DATE');
 });
@@ -78,6 +89,7 @@ test('idempotent creates, lifecycle, version conflict, and persistence survive r
   const input = trade({ client_request_id: '__proto__' });
   const created = await request('POST', '/api/records', input);
   assert.equal(created.status, 201);
+  assert.equal(created.body.data.trader, '示例');
   assert.equal(created.body.data.symbol, '600519.SH');
   assert.equal(created.body.data.version, 1);
   assert.equal(created.body.data.trade_time, null);
@@ -100,7 +112,10 @@ test('idempotent creates, lifecycle, version conflict, and persistence survive r
   assert.equal((await request('PATCH', `/api/records/${id}`, { expected_version: 1, note: 'stale' })).body.error.code, 'VERSION_CONFLICT');
   const reloaded = new JournalStore(filePath);
   assert.equal(reloaded.getRecord(id).price, 10.25);
-  assert.equal(reloaded.createRecord(recordInput(input)).duplicate, true);
+  const replayed = reloaded.createRecord(recordInput(input));
+  assert.equal(replayed.duplicate, true);
+  assert.equal(replayed.record.price, 10.25);
+  assert.equal(replayed.record.version, 2);
   assert.equal((await request('DELETE', `/api/records/${id}`)).status, 428);
   assert.equal((await request('DELETE', `/api/records/${id}?expected_version=1`)).body.error.code, 'VERSION_CONFLICT');
   assert.equal((await request('DELETE', `/api/records/${id}?expected_version=2`)).status, 204);
@@ -307,7 +322,8 @@ test('PATCH moving a sell between symbols rebuilds both FIFO paths', async (t) =
 
   const destination = (await request('GET', '/api/positions/current?as_of=2025-01-08&code=000001')).body.data.positions[0];
   assert.equal(destination.quantity, 3);
-  assert.equal(destination.position_key, '000001.SZ');
+  assert.equal(destination.trader, '示例');
+  assert.equal(destination.position_key, '示例\u001f000001.SZ');
   assert.equal(destination.open_date, '2025-01-07');
   assert.equal(destination.cost_amount, 30);
   assert.equal(destination.cost, 10.0001);
@@ -405,7 +421,8 @@ test('current positions serve the dev query, an empty book, unavailable quotes, 
     assert.deepEqual(positions.map((row) => row.symbol), ['000001.SZ', '600519.SH'], sort);
     assert.deepEqual(response.body.data.pagination, { limit: 20, offset: 0, total: 2, has_more: false });
     for (const row of positions) {
-      assert.equal(row.position_key, row.symbol);
+      assert.equal(row.trader, '示例');
+      assert.equal(row.position_key, `${row.trader}\u001f${row.symbol}`);
       assert.equal(row.open_date, '2026-10-10');
       assert.equal(row.quantity, 100);
       assert.equal(row.cost_amount, 1005);
@@ -450,6 +467,11 @@ test('current position sorts place null market value and return rate last', () =
   ];
   assert.deepEqual(sortPositions(tied, 'market_value_desc').map((item) => item.position_key), ['lot-a', 'lot-b']);
   assert.deepEqual(sortPositions(tied, 'return_rate_desc').map((item) => item.position_key), ['lot-a', 'lot-b']);
+  const byTrader = [
+    { symbol: '600519.SH', trader: 'a', position_key: 'a\u001f600519.SH', market_value: 1, return_rate: 0.1 },
+    { symbol: '600519.SH', trader: 'Z', position_key: 'Z\u001f600519.SH', market_value: 1, return_rate: 0.1 },
+  ];
+  assert.deepEqual(sortPositions(byTrader, 'symbol_asc').map((item) => item.trader), ['Z', 'a']);
 });
 
 test('journal listen port stays on the contract default when ambient PORT is taken', () => {
@@ -475,9 +497,264 @@ test('seed command is idempotent and produces current/history/review fixtures', 
     const store = new JournalStore(filePath);
     assert.equal(store.state.records.length, 3);
     assert.equal(store.state.reviews.length, 1);
+    assert.deepEqual(store.listTraders(), { traders: [{ trader: '示例', record_count: 3 }] });
     assert.equal(store.current({ as_of: '2025-01-08', limit: 50, offset: 0, sort: 'symbol_asc' }).positions[0].quantity, 50);
     assert.equal(store.history({ limit: 50, offset: 0, sort: 'close_date_desc' }).history.length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+function legacyRecord(fields) {
+  return {
+    trade_time: null, fee: '0', tax: '0', note: null, version: 1,
+    created_at: '2025-01-06T09:00:00+08:00', updated_at: '2025-01-06T09:00:00+08:00',
+    ...fields,
+  };
+}
+
+function legacyFingerprint(record) {
+  return JSON.stringify([
+    record.trade_date, record.trade_time, record.code, record.symbol, record.name,
+    record.side, record.price, record.quantity, record.fee, record.tax,
+    record.note, record.client_request_id,
+  ]);
+}
+
+test('v1 journal migrates traders and creation fingerprints without rewriting economics', async (t) => {
+  const review = {
+    id: 'rev_keep', version: 4, date: '2025-01-08', content: '保留复盘', tags: ['复盘'],
+    created_at: '2025-01-08T20:00:00+08:00', updated_at: '2025-01-08T21:00:00+08:00',
+  };
+  const yang = legacyRecord({
+    id: 'rec_yang', version: 3, trader: '  杨鹏  ', trade_date: '2025-01-06',
+    code: '600519', symbol: '600519.SH', name: '贵州茅台', side: 'buy', price: '99', quantity: 100,
+    client_request_id: 'key-yang', updated_at: '2025-01-07T09:00:00+08:00',
+  });
+  const missing = legacyRecord({
+    id: 'rec_missing', trade_date: '2025-01-06', code: '000001', symbol: '000001.SZ',
+    name: '平安银行', side: 'buy', price: '8', quantity: 10, client_request_id: 'key-missing',
+  });
+  const blank = legacyRecord({
+    id: 'rec_blank', trader: '   ', trade_date: '2025-01-06', code: '000858', symbol: '000858.SZ',
+    name: '五粮液', side: 'buy', price: '7', quantity: 10, client_request_id: 'key-blank',
+  });
+  const none = legacyRecord({
+    id: 'rec_null', trader: null, trade_date: '2025-01-06', code: '300750', symbol: '300750.SZ',
+    name: '宁德时代', side: 'buy', price: '6', quantity: 10, client_request_id: 'key-null',
+  });
+  const tooLong = legacyRecord({
+    id: 'rec_long', trader: 'x'.repeat(65), trade_date: '2025-01-06', code: '601318', symbol: '601318.SH',
+    name: '中国平安', side: 'buy', price: '5', quantity: 10, client_request_id: 'key-long',
+  });
+  const corrupt = legacyRecord({
+    id: 'rec_corrupt', trader: '示例', trade_date: '2025-01-06', code: '000002', symbol: '000002.SZ',
+    name: '万科A', side: 'buy', price: '4', quantity: 10, client_request_id: 'key-corrupt',
+  });
+  const already = legacyRecord({
+    id: 'rec_v2', trader: '杨鹏', trade_date: '2025-01-06', code: '600519', symbol: '600519.SH',
+    name: '贵州茅台', side: 'buy', price: '20', quantity: 50, client_request_id: 'key-v2',
+  });
+  const yangV1 = legacyFingerprint({ ...yang, price: '10' });
+  const missingV1 = legacyFingerprint(missing);
+  const v2Fingerprint = JSON.stringify(['杨鹏', '2025-01-06', null, '600519', '600519.SH', '贵州茅台', 'buy', '1', 50, '0', '0', null, 'key-v2']);
+  const initial = {
+    schema_version: 1,
+    records: [yang, missing, blank, none, tooLong, corrupt, already],
+    reviews: [review],
+    requests: [
+      { key: 'key-yang', recordId: 'rec_yang', fingerprint: yangV1 },
+      { key: 'key-missing', recordId: 'rec_missing', fingerprint: missingV1 },
+      { key: 'key-blank', recordId: 'rec_blank', fingerprint: legacyFingerprint(blank) },
+      { key: 'key-null', recordId: 'rec_null', fingerprint: legacyFingerprint(none) },
+      { key: 'key-long', recordId: 'rec_long', fingerprint: legacyFingerprint(tooLong) },
+      { key: 'key-corrupt', recordId: 'rec_corrupt', fingerprint: 'not-json' },
+      { key: 'key-v2', recordId: 'rec_v2', fingerprint: v2Fingerprint },
+      { key: 'key-orphan', recordId: 'rec_gone', fingerprint: missingV1 },
+    ],
+  };
+  const { request, store, filePath } = await harness(t, initial);
+  const migrated = JSON.parse(readFileSync(filePath, 'utf8'));
+  assert.equal(migrated.schema_version, 2);
+  assert.deepEqual(store.state.reviews, [review]);
+  const byId = Object.fromEntries(store.state.records.map((record) => [record.id, record]));
+  assert.deepEqual(store.state.records.map((record) => record.id), initial.records.map((record) => record.id));
+  assert.equal(byId.rec_yang.trader, '杨鹏');
+  assert.equal(byId.rec_yang.version, 3);
+  assert.equal(byId.rec_yang.price, '99');
+  assert.equal(byId.rec_yang.updated_at, '2025-01-07T09:00:00+08:00');
+  assert.equal(byId.rec_yang.created_at, '2025-01-06T09:00:00+08:00');
+  for (const id of ['rec_missing', 'rec_blank', 'rec_null', 'rec_long']) assert.equal(byId[id].trader, '未指定');
+  assert.equal(byId.rec_corrupt.trader, '示例');
+  assert.equal(byId.rec_v2.trader, '杨鹏');
+  assert.equal(byId.rec_v2.price, '20');
+  const fingerprint = (key) => store.state.requests.find((item) => item.key === key).fingerprint;
+  const yangParts = JSON.parse(fingerprint('key-yang'));
+  assert.equal(yangParts.length, 13);
+  assert.equal(yangParts[0], '杨鹏');
+  assert.deepEqual(yangParts.slice(1), JSON.parse(yangV1));
+  assert.equal(JSON.parse(fingerprint('key-missing'))[0], '未指定');
+  assert.deepEqual(JSON.parse(fingerprint('key-missing')).slice(1), JSON.parse(missingV1));
+  assert.equal(JSON.parse(fingerprint('key-blank'))[0], '未指定');
+  assert.equal(JSON.parse(fingerprint('key-null'))[0], '未指定');
+  assert.equal(JSON.parse(fingerprint('key-long'))[0], '未指定');
+  assert.equal(fingerprint('key-corrupt'), 'not-json');
+  assert.equal(fingerprint('key-v2'), v2Fingerprint);
+  assert.equal(store.state.requests.some((item) => item.key === 'key-orphan'), false);
+  const stable = readFileSync(filePath, 'utf8');
+  assert.equal(new JournalStore(filePath).state.schema_version, 2);
+  assert.equal(readFileSync(filePath, 'utf8'), stable);
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: '未指定', record_count: 4 },
+    { trader: '杨鹏', record_count: 2 },
+    { trader: '示例', record_count: 1 },
+  ]);
+
+  const replay = await request('POST', '/api/records', {
+    trader: '杨鹏', trade_date: '2025-01-06', trade_time: null, code: '600519', name: '贵州茅台',
+    side: 'buy', price: 10, quantity: 100, fee: 0, tax: 0, note: null, client_request_id: 'key-yang',
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.meta.duplicate, true);
+  assert.equal(replay.body.data.id, 'rec_yang');
+  assert.equal(replay.body.data.price, 99);
+  assert.equal(replay.body.data.version, 3);
+  assert.equal(replay.body.data.trader, '杨鹏');
+  const wrongPrice = await request('POST', '/api/records', {
+    trader: '杨鹏', trade_date: '2025-01-06', code: '600519', name: '贵州茅台',
+    side: 'buy', price: 99, quantity: 100, fee: 0, client_request_id: 'key-yang',
+  });
+  assert.equal(wrongPrice.status, 409);
+  assert.equal(wrongPrice.body.error.code, 'DUPLICATE_RECORD');
+  const corruptReplay = await request('POST', '/api/records', trade({
+    code: '000002', name: '万科A', price: 4, quantity: 10, fee: 0, client_request_id: 'key-corrupt',
+  }));
+  assert.equal(corruptReplay.status, 409);
+  assert.equal(corruptReplay.body.error.code, 'DUPLICATE_RECORD');
+  assert.equal((await request('GET', '/api/records/rec_corrupt')).body.data.price, 4);
+  const released = await request('POST', '/api/records', trade({ client_request_id: 'key-orphan', fee: 0 }));
+  assert.equal(released.status, 201);
+
+  const patched = await request('PATCH', '/api/records/rec_yang', { expected_version: 3, price: 50 });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.data.version, 4);
+  assert.equal(JSON.parse(fingerprint('key-yang'))[7], '10');
+  const replayAfterPatch = await request('POST', '/api/records', {
+    trader: '杨鹏', trade_date: '2025-01-06', trade_time: null, code: '600519', name: '贵州茅台',
+    side: 'buy', price: 10, quantity: 100, fee: 0, tax: 0, note: null, client_request_id: 'key-yang',
+  });
+  assert.equal(replayAfterPatch.status, 200);
+  assert.equal(replayAfterPatch.body.meta.duplicate, true);
+  assert.equal(replayAfterPatch.body.data.price, 50);
+  assert.equal(replayAfterPatch.body.data.version, 4);
+});
+
+test('trader list uses exact counts and UTF-16 order, and books do not cross traders', async (t) => {
+  const { request } = await harness(t);
+  assert.deepEqual((await request('GET', '/api/traders')).body, { data: { traders: [] } });
+  assert.equal((await request('GET', '/api/traders?limit=1')).status, 422);
+  const z1 = await request('POST', '/api/records', trade({ trader: 'Z', code: '002415', name: '海康威视', client_request_id: 'z-1' }));
+  const z2 = await request('POST', '/api/records', trade({ trader: 'Z', code: '000001', name: '平安银行' }));
+  const lower = await request('POST', '/api/records', trade({ trader: 'a', code: '000858', name: '五粮液' }));
+  const unspecified = await request('POST', '/api/records', trade({ trader: '  未指定  ', code: '601318', name: '中国平安' }));
+  assert.equal(z1.status, 201);
+  assert.equal(unspecified.body.data.trader, '未指定');
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders, [
+    { trader: 'Z', record_count: 2 },
+    { trader: 'a', record_count: 1 },
+    { trader: '未指定', record_count: 1 },
+  ]);
+  assert.equal((await request('DELETE', `/api/records/${lower.body.data.id}?expected_version=1`)).status, 204);
+  assert.deepEqual((await request('GET', '/api/traders')).body.data.traders.map((item) => item.trader), ['Z', '未指定']);
+
+  const jia = await request('POST', '/api/records', trade({ trader: '甲', price: 10, fee: 5, quantity: 100 }));
+  const yi = await request('POST', '/api/records', trade({ trader: '乙', price: 20, fee: 0, quantity: 100 }));
+  assert.equal(jia.status, 201);
+  assert.equal(yi.status, 201);
+  const cross = await request('POST', '/api/records', trade({
+    trader: '乙', side: 'sell', quantity: 150, trade_date: '2025-01-08', price: 22, fee: 0,
+  }));
+  assert.equal(cross.status, 409);
+  assert.equal(cross.body.error.code, 'INSUFFICIENT_POSITION');
+  assert.equal((await request('GET', '/api/positions/current?as_of=2025-01-08&trader=甲')).body.data.positions[0].quantity, 100);
+  const sold = await request('POST', '/api/records', trade({
+    trader: '乙', side: 'sell', quantity: 40, trade_date: '2025-01-08', price: 22, fee: 0, tax: 0,
+  }));
+  assert.equal(sold.status, 201);
+  const current = await request('GET', '/api/positions/current?as_of=2025-01-08&code=600519');
+  assert.equal(current.body.data.pagination.total, 2);
+  assert.deepEqual(current.body.data.positions.map((row) => [row.trader, row.quantity]), [['乙', 60], ['甲', 100]]);
+  assert.equal(current.body.data.positions[0].position_key, '乙\u001f600519.SH');
+  const jiaBook = await request('GET', '/api/positions/current?as_of=2025-01-08&trader=%20%E7%94%B2%20');
+  assert.equal(jiaBook.body.data.pagination.total, 1);
+  assert.equal(jiaBook.body.data.positions[0].trader, '甲');
+  assert.equal(jiaBook.body.data.positions[0].quantity, 100);
+  const history = await request('GET', '/api/positions/history?trader=乙');
+  assert.equal(history.body.data.pagination.total, 1);
+  assert.equal(history.body.data.history[0].trader, '乙');
+  assert.equal(history.body.data.history[0].quantity, 40);
+  assert.equal((await request('GET', '/api/positions/history?trader=甲')).body.data.pagination.total, 0);
+  assert.equal((await request('GET', '/api/records?trader=乙')).body.data.pagination.total, 2);
+  assert.equal((await request('GET', '/api/records?trader=%20%20%E4%B9%99')).body.data.pagination.total, 2);
+  assert.equal((await request('GET', '/api/records?trader=没有')).body.data.pagination.total, 0);
+  assert.equal((await request('GET', '/api/positions/current?trader=没有')).body.data.pagination.total, 0);
+  assert.equal((await request('GET', '/api/records?trader=%20')).status, 422);
+  assert.equal(z2.status, 201);
+});
+
+test('request keys keep the creation fingerprint through price edits, A→B→A, and null release', async (t) => {
+  const { request } = await harness(t);
+  const input = trade({ client_request_id: 'key-a', price: 10, fee: 0, tax: 0 });
+  const created = await request('POST', '/api/records', input);
+  assert.equal(created.status, 201);
+  const id = created.body.data.id;
+  const patched = await request('PATCH', `/api/records/${id}`, { expected_version: 1, price: 11 });
+  assert.equal(patched.body.data.version, 2);
+  const replay = await request('POST', '/api/records', input);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.meta.duplicate, true);
+  assert.equal(replay.body.data.id, id);
+  assert.equal(replay.body.data.price, 11);
+  assert.equal(replay.body.data.version, 2);
+  assert.equal((await request('POST', '/api/records', { ...input, price: 11 })).status, 409);
+  assert.equal((await request('POST', '/api/records', { ...input, trader: '乙' })).status, 409);
+
+  const toB = await request('PATCH', `/api/records/${id}`, { expected_version: 2, client_request_id: 'key-b' });
+  assert.equal(toB.status, 200);
+  assert.equal(toB.body.data.client_request_id, 'key-b');
+  assert.equal(toB.body.data.version, 3);
+  const replayA = await request('POST', '/api/records', input);
+  assert.equal(replayA.status, 200);
+  assert.equal(replayA.body.data.price, 11);
+  assert.equal(replayA.body.data.client_request_id, 'key-b');
+  assert.equal(replayA.body.data.version, 3);
+  const replayB = await request('POST', '/api/records', { ...input, price: 11, client_request_id: 'key-b' });
+  assert.equal(replayB.status, 200);
+  assert.equal(replayB.body.meta.duplicate, true);
+  assert.equal(replayB.body.data.id, id);
+
+  const back = await request('PATCH', `/api/records/${id}`, { expected_version: 3, client_request_id: 'key-a' });
+  assert.equal(back.status, 200);
+  assert.equal(back.body.data.version, 4);
+  assert.equal((await request('POST', '/api/records', input)).body.data.version, 4);
+  assert.equal((await request('POST', '/api/records', { ...input, price: 11, client_request_id: 'key-b' })).body.data.id, id);
+
+  const foreign = await request('POST', '/api/records', trade({ trader: '乙', client_request_id: 'key-foreign', fee: 0 }));
+  assert.equal(foreign.status, 201);
+  const clash = await request('PATCH', `/api/records/${id}`, { expected_version: 4, client_request_id: 'key-foreign' });
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.error.code, 'DUPLICATE_RECORD');
+  assert.equal((await request('GET', `/api/records/${id}`)).body.data.version, 4);
+  assert.equal((await request('GET', `/api/records/${id}`)).body.data.client_request_id, 'key-a');
+
+  const cleared = await request('PATCH', `/api/records/${id}`, { expected_version: 4, client_request_id: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.data.client_request_id, null);
+  const reused = await request('POST', '/api/records', input);
+  assert.equal(reused.status, 201);
+  assert.notEqual(reused.body.data.id, id);
+  const reusedB = await request('POST', '/api/records', {
+    ...input, price: 11, client_request_id: 'key-b', code: '000001', name: '平安银行',
+  });
+  assert.equal(reusedB.status, 201);
 });

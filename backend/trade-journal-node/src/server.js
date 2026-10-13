@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { ApiError, listQuery, recordInput, reviewInput, versionQuery } from './validation.js';
+import { ApiError, listQuery, recordInput, reviewInput, tradersQuery, versionQuery } from './validation.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -72,6 +72,11 @@ async function route(request, response, store) {
       store.deleteReview(reviewId, deleteVersion(searchParams));
       return reply(response, 204);
     }
+  }
+
+  if (pathname === '/api/traders' && method === 'GET') {
+    tradersQuery(searchParams);
+    return reply(response, 200, { data: store.listTraders() });
   }
 
   if (pathname === '/api/positions/current' && method === 'GET') {

@@ -1,6 +1,7 @@
 {
   "records": [
     {
+      "trader": "示例",
       "trade_date": "2025-01-06",
       "trade_time": "09:45:00",
       "code": "600519",
@@ -12,6 +13,7 @@
       "client_request_id": "seed-maotai-buy-1"
     },
     {
+      "trader": "示例",
       "trade_date": "2025-01-07",
       "trade_time": "10:10:00",
       "code": "600519",
@@ -23,6 +25,7 @@
       "client_request_id": "seed-maotai-buy-2"
     },
     {
+      "trader": "示例",
       "trade_date": "2025-01-08",
       "trade_time": "14:20:00",
       "code": "600519",
