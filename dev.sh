@@ -151,16 +151,20 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
 fi
 
 # ===== 4. 启动 + 日志前缀 =====
-PIDS=()
+# 后台作业各占一个进程组，让退出信号也能传给管道和服务子进程。
+# macOS Bash 3.2 的 job control 会将 $! 设为该后台作业的 PGID。
+set -m
+PGIDS=()
 
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
   echo
   info "关闭服务..."
-  for pid in "${PIDS[@]:-}"; do
-    if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null || true
+  for pgid in "${PGIDS[@]:-}"; do
+    # 已结束的作业可能让 PGID 被系统复用，只向仍在本脚本作业表中的组发信号。
+    if [ -n "$pgid" ] && jobs -p | grep -Fqx "$pgid"; then
+      kill -TERM -- "-$pgid" 2>/dev/null || true
     fi
   done
   # 等子进程退出,避免孤儿
@@ -197,7 +201,7 @@ echo
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &
-PIDS+=("$!")
+PGIDS+=("$!")
 
 (
   cd "$TRADE_JOURNAL_DIR"
@@ -205,7 +209,7 @@ PIDS+=("$!")
   export TRADE_JOURNAL_PORT=3022
   exec node src/index.js > >(prefix_awk "$(printf "${YELLOW}[journal ]${NC} ")") 2>&1
 ) &
-PIDS+=("$!")
+PGIDS+=("$!")
 
 (
   cd "$FRONTEND_DIR"
@@ -213,7 +217,7 @@ PIDS+=("$!")
     pnpm dev --host "$BACKEND_HOST" --port "$FRONTEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${GREEN}[frontend]${NC} ")"
 ) &
-PIDS+=("$!")
+PGIDS+=("$!")
 
 # 等任一退出(bash 4.3+)或全部退出(老 bash)
 if wait -n 2>/dev/null; then
