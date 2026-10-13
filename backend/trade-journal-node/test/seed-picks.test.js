@@ -74,10 +74,14 @@ test('sample file is marked as sample data and builds file-import buys', () => {
   const parsed = parseArgs(['--from-file', samplePath, '--dry-run']);
   assert.equal(parsed.journal, 'http://127.0.0.1:3022');
   assert.equal(parsed.tspBase, 'http://47.95.156.102:5000');
+  assert.equal(parsed.trader, null);
+  assert.equal(parseArgs(['--from-file', samplePath, '--trader', '  杨鹏  ']).trader, '杨鹏');
   assert.throws(() => parseArgs(['--journal', 'http://user:pass@127.0.0.1:3022', '--from-file', 'x']), /凭证/);
+  assert.throws(() => parseArgs(['--from-file', samplePath, '--trader', '   ']), /trader 不能为空/);
+  assert.throws(() => parseArgs(['--from-file', samplePath, '--trader', 'a'.repeat(65)]), /1 到 64/);
 });
 
-test('dry-run reads only the two TSP GET endpoints and does not post', async () => {
+test('dry-run reads only the two TSP GET endpoints and defaults TSP trader', async () => {
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push({ href: String(url), method: init.method });
@@ -96,8 +100,23 @@ test('dry-run reads only the two TSP GET endpoints and does not post', async () 
   assert.equal(report.records[0].side, 'buy');
   assert.equal(report.records[0].price, 3.54);
   assert.equal(report.records[0].note, 'AI选股：因子组合 · atr_pct + 原始评分 99.5');
-  assert.equal(report.records[0].client_request_id, '2026-10-13600905.SH');
+  assert.equal(report.trader, 'AI选股:因子组合 · atr_pct');
+  assert.equal(report.records[0].trader, 'AI选股:因子组合 · atr_pct');
+  assert.equal(report.records[0].client_request_id, 'seed2:2026-10-13:600905.SH:2385ce30680333b00ef17da18123f44a');
   assert.equal(report.score_order, 'desc');
+});
+
+test('TSP default trader is validated after resolving the display strategy name', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith('/api/strategies')) {
+      return jsonResponse(200, { strategies: [{ id: 'long_name', name: '策'.repeat(60) }] });
+    }
+    return jsonResponse(200, { result: { as_of: today, rows: [tspRow({ score: 1, raw_close: 3.54 })], total: 1 } });
+  };
+  await assert.rejects(
+    () => runSeed(['--from-tsp', '--strategy', 'long_name', '--count', '1', '--dry-run'], { fetch: fetchImpl, today }),
+    /trader 长度必须为 1 到 64/,
+  );
 });
 
 test('file dry-run uses Shanghai today and never calls fetch', async () => {
@@ -106,9 +125,64 @@ test('file dry-run uses Shanghai today and never calls fetch', async () => {
   });
   assert.equal(report.trade_date, todayShanghai());
   assert.equal(report.label, '文件导入');
+  assert.equal(report.trader, 'AI选股:文件导入');
   assert.equal(report.sample, true);
   assert.equal(report.records.length, 3);
+  assert.equal(report.records[0].trader, 'AI选股:文件导入');
+  assert.equal(report.records[0].client_request_id, `seed2:${report.trade_date}:600519.SH:eabfe5d0f352db0ef8ee4a6daab7aa33`);
   assert.match(report.records[0].note, /^AI选股：文件导入 \+ 示例：/);
+});
+
+test('posts explicit trader and seed2 client_request_id payload', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'seed-picks-payload-'));
+  try {
+    const file = join(directory, 'picks.json');
+    writeFileSync(file, JSON.stringify({ picks: [{ symbol: '600519.SH', name: '贵州茅台', price: 10, reason: '测试导入' }] }));
+    const payloads = [];
+    const report = await runSeed(['--from-file', file, '--journal', 'http://127.0.0.1:3022', '--trader', '  杨鹏  '], {
+      today,
+      fetch: async (_url, init) => {
+        payloads.push(JSON.parse(init.body));
+        return jsonResponse(201, { data: { id: 'rec_payload' } });
+      },
+    });
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].trader, '杨鹏');
+    assert.equal(payloads[0].client_request_id, 'seed2:2026-10-13:600519.SH:abfa1300c64075b349e57eeacc7da2bd');
+    assert.equal(payloads[0].note, 'AI选股：文件导入 + 测试导入');
+    assert.equal(report.results[0].status, 'created');
+    assert.equal(report.results[0].symbol, '600519.SH');
+    assert.equal(report.results[0].trader, '杨鹏');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('same symbol can be imported once per trader and rerun as duplicates', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'seed-picks-traders-'));
+  const store = new JournalStore(join(directory, 'journal.json'));
+  const server = createApp(store);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const file = join(directory, 'picks.json');
+  writeFileSync(file, JSON.stringify({ picks: [{ symbol: '600519.SH', name: '贵州茅台', price: 10, reason: '测试导入' }] }));
+  const journal = `http://127.0.0.1:${server.address().port}`;
+  const first = await runSeed(['--from-file', file, '--journal', journal, '--trader', '交易人甲'], { today });
+  const second = await runSeed(['--from-file', file, '--journal', journal, '--trader', '交易人乙'], { today });
+  assert.equal(first.results[0].status, 'created');
+  assert.equal(second.results[0].status, 'created');
+  assert.equal(first.results[0].client_request_id, 'seed2:2026-10-13:600519.SH:c742fab4a17265c8831a67617844a303');
+  assert.equal(second.results[0].client_request_id, 'seed2:2026-10-13:600519.SH:79e3dabe7416b706f31bbee916a6c522');
+  assert.equal(store.state.records.length, 2);
+  assert.deepEqual(store.state.records.map((record) => record.trader).sort(), ['交易人乙', '交易人甲'].sort());
+  const replayFirst = await runSeed(['--from-file', file, '--journal', journal, '--trader', '交易人甲'], { today });
+  const replaySecond = await runSeed(['--from-file', file, '--journal', journal, '--trader', '交易人乙'], { today });
+  assert.equal(replayFirst.results[0].status, 'duplicate');
+  assert.equal(replaySecond.results[0].status, 'duplicate');
+  assert.equal(store.state.records.length, 2);
 });
 
 test('identical replay is duplicate and a changed price is a 409 conflict', async (t) => {
@@ -128,8 +202,12 @@ test('identical replay is duplicate and a changed price is a 409 conflict', asyn
   const created = await runSeed(argv, { today });
   assert.equal(created.results[0].status, 'created');
   assert.equal(created.results[0].http_status, 201);
+  assert.equal(created.results[0].symbol, '600519.SH');
+  assert.equal(created.results[0].trader, 'AI选股:文件导入');
   assert.equal(created.results[0].price, 10.1235);
+  assert.equal(created.results[0].client_request_id, 'seed2:2026-10-13:600519.SH:eabfe5d0f352db0ef8ee4a6daab7aa33');
   assert.equal(store.getRecord(created.results[0].id).price, 10.1235);
+  assert.equal(store.getRecord(created.results[0].id).trader, 'AI选股:文件导入');
   assert.equal(store.getRecord(created.results[0].id).quantity, 100);
   const replay = await runSeed(argv, { today });
   assert.equal(replay.results[0].status, 'duplicate');
@@ -147,6 +225,7 @@ test('identical replay is duplicate and a changed price is a 409 conflict', asyn
   assert.equal(drifted.results[0].http_status, 409);
   assert.equal(drifted.results[0].error_code, 'DUPLICATE_RECORD');
   assert.match(drifted.results[0].message, /不一致/);
+  assert.equal(drifted.results[0].symbol, '600519.SH');
   assert.equal(store.state.records.length, 1);
 });
 

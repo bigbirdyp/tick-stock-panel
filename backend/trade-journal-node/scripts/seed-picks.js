@@ -1,6 +1,7 @@
 // 把选股结果写成今天的买入记录。只读 TSP 策略列表和缓存结果，再 POST /api/records。
-// 价格只用 raw_close（未复权收盘价）。client_request_id 是上海日期拼接规范 symbol：
+// 价格只用 raw_close（未复权收盘价）。client_request_id 按交易人哈希生成：
 // 内容相同的重复提交记为 duplicate，同一键但价格或备注变了记为 conflict，避免静默覆盖。
+import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { todayShanghai } from '../src/store.js';
@@ -18,9 +19,10 @@ const HELP = `用法:
 
 默认 POST ${JOURNAL_ORIGIN}/api/records。--journal 可改地址。
 --tsp-base 默认 ${TSP_ORIGIN}，只 GET /api/strategies 和 /api/screener/cached-result/{id}。
+--trader 可显式指定交易人标签；默认 TSP 模式为「AI选股:<策略展示名>」，文件模式为「AI选股:文件导入」。
 文件需包含 picks 数组；每条 pick 需有 symbol、name、price、reason。
 每只股票买入 ${SHARES} 股，交易日为 Asia/Shanghai 今天。备注为「AI选股：<策略或文件导入> + <理由>」。
-client_request_id 为「日期+规范 symbol」。完全相同的重复提交不新写记录；内容不一致会失败。`;
+client_request_id 为「seed2:日期:规范 symbol:交易人哈希」。完全相同的重复提交不新写记录；内容不一致会失败。`;
 
 function originOnly(raw, label) {
   let url;
@@ -38,8 +40,26 @@ function take(argv, index, token) {
   return value;
 }
 
+export function normalizeTrader(value) {
+  if (typeof value !== 'string') throw new Error('trader 必须是字符串');
+  const trader = value.trim();
+  if (trader.length < 1) throw new Error('trader 不能为空');
+  if (trader.length > 64) throw new Error('trader 长度必须为 1 到 64 个 UTF-16 字符');
+  return trader;
+}
+
 export function parseArgs(argv) {
-  const args = { help: false, dryRun: false, journal: JOURNAL_ORIGIN, tspBase: TSP_ORIGIN, mode: null, strategy: null, count: null, file: null };
+  const args = {
+    help: false,
+    dryRun: false,
+    journal: JOURNAL_ORIGIN,
+    tspBase: TSP_ORIGIN,
+    mode: null,
+    strategy: null,
+    count: null,
+    file: null,
+    trader: null,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === '--help' || token === '-h') args.help = true;
@@ -59,6 +79,9 @@ export function parseArgs(argv) {
       const raw = take(argv, index += 1, token);
       if (!/^[1-9]\d*$/.test(raw) || Number(raw) > 100) throw new Error('--count 必须是 1 到 100 的整数');
       args.count = Number(raw);
+    } else if (token === '--trader') {
+      if (args.trader !== null) throw new Error('--trader 只能指定一次');
+      args.trader = normalizeTrader(take(argv, index += 1, token));
     } else if (token === '--journal') args.journal = take(argv, index += 1, token);
     else if (token === '--tsp-base') args.tspBase = take(argv, index += 1, token);
     else throw new Error(`未知参数：${token}`);
@@ -143,10 +166,20 @@ function buildNote(label, reason) {
   return note;
 }
 
-export function buildBuyRecord(pick, tradeDate, label) {
-  const clientRequestId = `${tradeDate}${pick.symbol}`;
+export function defaultTrader(mode, label) {
+  return normalizeTrader(mode === 'tsp' ? `AI选股:${label}` : `AI选股:${FILE_LABEL}`);
+}
+
+export function buildClientRequestId(tradeDate, symbol, trader) {
+  const traderHash = createHash('sha256').update(trader, 'utf8').digest('hex').slice(0, 32);
+  const clientRequestId = `seed2:${tradeDate}:${symbol}:${traderHash}`;
   if (clientRequestId.length > REQUEST_LIMIT) throw new Error('client_request_id 超过 80 个字符');
+  return clientRequestId;
+}
+
+export function buildBuyRecord(pick, tradeDate, label, trader) {
   return {
+    trader,
     trade_date: tradeDate,
     code: pick.code,
     name: pick.name,
@@ -154,7 +187,7 @@ export function buildBuyRecord(pick, tradeDate, label) {
     price: pick.price,
     quantity: SHARES,
     note: buildNote(label, pick.reason),
-    client_request_id: clientRequestId,
+    client_request_id: buildClientRequestId(tradeDate, pick.symbol, trader),
   };
 }
 
@@ -162,6 +195,11 @@ function displayName(value) {
   if (typeof value !== 'string') return null;
   const name = value.trim();
   return name.length >= 1 && name.length <= 64 ? name : null;
+}
+
+function strategyDisplayName(value, fallback) {
+  if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  return fallback;
 }
 
 function qualifyTspRow(row, asOf) {
@@ -218,8 +256,7 @@ export function findStrategy(body, query) {
   if (matches.length > 1) throw new Error(`策略名称或 ID 不唯一：${needle}`);
   const strategy = matches[0];
   if (typeof strategy.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(strategy.id)) throw new Error('策略 id 无效');
-  const name = displayName(strategy.name, strategy.id) ?? strategy.id;
-  return { id: strategy.id, name };
+  return { id: strategy.id, name: strategyDisplayName(strategy.name, strategy.id) };
 }
 
 function filePick(row, index) {
@@ -296,11 +333,12 @@ async function postRecord(fetchImpl, origin, record) {
   catch { return { status: response.status, json: false, body: null }; }
 }
 
-function classify(record, response) {
+function classify(record, symbol, response) {
   const item = {
-    symbol: record.client_request_id.slice(record.trade_date.length),
+    symbol,
     code: record.code,
     name: record.name,
+    trader: record.trader,
     price: record.price,
     quantity: record.quantity,
     client_request_id: record.client_request_id,
@@ -322,7 +360,7 @@ function classify(record, response) {
       ...item,
       status: 'conflict',
       error_code: 'DUPLICATE_RECORD',
-      message: '相同 client_request_id 已存在，但本次价格、名称或备注与已写入记录不一致',
+      message: '相同 client_request_id 已存在，但本次价格、名称、备注或交易人与已写入记录不一致',
     };
   }
   return { ...item, status: 'error', error_code: body?.error?.code ?? null, message: body?.error?.message ?? `HTTP ${response.status}` };
@@ -352,11 +390,14 @@ export async function runSeed(argv, deps = {}) {
     const cached = await readJson(fetchImpl, tspUrl(options.tspBase, `/api/screener/cached-result/${strategy.id}`));
     loaded = { label: strategy.name, sample: false, ...selectCachedPicks(cached, options.count, today) };
   }
-  const records = loaded.picks.map((pick) => buildBuyRecord(pick, today, loaded.label));
+  const trader = options.trader ?? defaultTrader(options.mode, loaded.label);
+  const postables = loaded.picks.map((pick) => ({ symbol: pick.symbol, record: buildBuyRecord(pick, today, loaded.label, trader) }));
+  const records = postables.map(({ record }) => record);
   const header = {
     trade_date: today,
     source: options.mode,
     label: loaded.label,
+    trader,
     sample: loaded.sample,
     score_order: options.mode === 'tsp' ? 'desc' : null,
     skipped_count: loaded.skippedCount,
@@ -364,7 +405,7 @@ export async function runSeed(argv, deps = {}) {
   };
   if (options.dryRun) return { ...header, dry_run: true, records };
   const results = [];
-  for (const record of records) results.push(classify(record, await postRecord(fetchImpl, options.journal, record)));
+  for (const { record, symbol } of postables) results.push(classify(record, symbol, await postRecord(fetchImpl, options.journal, record)));
   return { ...header, dry_run: false, counts: counts(results), results };
 }
 
