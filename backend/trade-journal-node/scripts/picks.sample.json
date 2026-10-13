@@ -1,0 +1,24 @@
+{
+  "sample": true,
+  "description": "示例数据，不是 tsp-stock-selector 的真实选股结果。价格是演示数字，不能当成行情。",
+  "picks": [
+    {
+      "symbol": "600519.SH",
+      "name": "贵州茅台",
+      "price": 1688.5,
+      "reason": "示例：演示用价格，不是行情"
+    },
+    {
+      "symbol": "000001.SZ",
+      "name": "平安银行",
+      "price": 11.2,
+      "reason": "示例：演示用价格，不是行情"
+    },
+    {
+      "symbol": "300750.SZ",
+      "name": "宁德时代",
+      "price": 188.88,
+      "reason": "示例：演示用价格，不是行情"
+    }
+  ]
+}
