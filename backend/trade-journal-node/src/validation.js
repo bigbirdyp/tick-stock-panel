@@ -113,18 +113,21 @@ export function recordInput(value, patch = false) {
 
 export function reviewInput(value, patch = false) {
   const body = objectBody(value);
-  allowedKeys(body, patch ? ['date', 'content', 'tags', 'expected_version'] : ['date', 'content', 'tags']);
+  allowedKeys(body, patch ? ['date', 'content', 'tags', 'trader', 'expected_version'] : ['date', 'content', 'tags', 'trader']);
   if (patch && !own(body, 'expected_version')) throw new ApiError(428, 'PRECONDITION_REQUIRED', '缺少 expected_version');
   if (patch && Object.keys(body).length < 2) throw invalid('$', '至少提交一个可写字段');
-  if (!patch) for (const key of ['date', 'content']) if (!own(body, key)) throw invalid(key, '必填');
+  // Missing-field order is date, content, trader, and it wins over later format checks.
+  if (!patch) for (const key of ['date', 'content', 'trader']) if (!own(body, key)) throw invalid(key, '必填');
   const result = {};
   if (patch) result.expected_version = integerField(body.expected_version, 'expected_version', 1);
+  // Format order is date, content, tags, trader so the first failing field is stable.
   if (own(body, 'date')) result.date = dateField(body.date, 'date');
   if (own(body, 'content')) result.content = textField(body.content, 'content', 1, 20_000);
   if (own(body, 'tags')) {
     if (!Array.isArray(body.tags) || body.tags.length > 20) throw invalid('tags', '必须是最多 20 项的数组');
     result.tags = body.tags.map((tag, index) => textField(tag, `tags[${index}]`, 1, 30));
   }
+  if (own(body, 'trader')) result.trader = traderField(body.trader);
   if (!patch) result.tags ??= [];
   return result;
 }
@@ -139,7 +142,7 @@ export function versionQuery(params) {
 export function listQuery(params, kind) {
   const choices = {
     records: { fields: ['trader', 'date', 'from', 'to', 'code', 'side'], sorts: ['trade_date_desc', 'trade_date_asc'] },
-    reviews: { fields: ['date', 'from', 'to', 'tag'], sorts: ['date_desc', 'date_asc'] },
+    reviews: { fields: ['trader', 'date', 'from', 'to', 'tag'], sorts: ['date_desc', 'date_asc'] },
     current: { fields: ['as_of', 'trader', 'code'], sorts: ['symbol_asc', 'market_value_desc', 'return_rate_desc'] },
     history: { fields: ['from', 'to', 'trader', 'code'], sorts: ['close_date_desc', 'close_date_asc'] },
   }[kind];
