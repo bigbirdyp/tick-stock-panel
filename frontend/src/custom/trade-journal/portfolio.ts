@@ -46,17 +46,24 @@ function unavailable(): QuoteMark {
   return { current_price: null, price_source: null, price_as_of: null, price_status: 'unavailable' }
 }
 
+function bookKey(trader: string, symbol: string): string {
+  return `${trader}\u001f${symbol}`
+}
+
 /**
- * 按 docs/api.md §6 做 FIFO。卖出超过未平仓数量时整笔失败，不产生部分持仓。
+ * 按 docs/api.md §6 做 FIFO。账本键是 (trader, symbol)，不同交易者的同名股票不互相消耗。
+ * 卖出超过未平仓数量时整笔失败，不产生部分持仓。
  * 对外历史行按卖出记录聚合，history_id 等于卖出记录 id。
  */
 export function buildPortfolio(records: TradeRecord[], quotes: ReadonlyMap<string, QuoteMark>): Portfolio | { ok: false } {
   const ordered = [...records].sort(compareTradeOrder)
-  const lots = new Map<string, OpenLot[]>()
+  const lots = new Map<string, { trader: string; symbol: string; book: OpenLot[] }>()
   const history: BuiltHistory[] = []
 
   for (const record of ordered) {
-    const book = lots.get(record.symbol) ?? []
+    const key = bookKey(record.trader, record.symbol)
+    const entry = lots.get(key) ?? { trader: record.trader, symbol: record.symbol, book: [] }
+    const book = entry.book
     if (record.side === 'buy') {
       const price = decFromNumber(record.price, 4)
       const fee = decFromNumber(record.fee, 2)
@@ -68,7 +75,7 @@ export function buildPortfolio(records: TradeRecord[], quotes: ReadonlyMap<strin
         remainingQty: record.quantity,
         remainingCost: mulQty(price, record.quantity) + fee + tax,
       })
-      lots.set(record.symbol, book)
+      lots.set(key, entry)
       continue
     }
 
@@ -101,13 +108,14 @@ export function buildPortfolio(records: TradeRecord[], quotes: ReadonlyMap<strin
       }
       need -= matched
     }
-    lots.set(record.symbol, next)
+    lots.set(key, { ...entry, book: next })
     const exitAmount = mulQty(price, record.quantity) - fee - tax
     const pnl = exitAmount - consumed
     history.push({
       history_id: record.id,
       sell_record_id: record.id,
       buy_record_ids: buyIds,
+      trader: record.trader,
       code: record.code,
       symbol: record.symbol,
       name: record.name,
@@ -127,12 +135,13 @@ export function buildPortfolio(records: TradeRecord[], quotes: ReadonlyMap<strin
   }
 
   const positions: Position[] = []
-  for (const [symbol, book] of lots) {
+  for (const [key, entry] of lots) {
+    const { trader, symbol, book } = entry
     const open = book.filter(lot => lot.remainingQty > 0)
     if (open.length === 0) continue
     const quantity = open.reduce((sum, lot) => sum + lot.remainingQty, 0)
     const costAmount = open.reduce((sum, lot) => sum + lot.remainingCost, 0n)
-    const related = ordered.filter(record => record.symbol === symbol)
+    const related = ordered.filter(record => record.trader === trader && record.symbol === symbol)
     const latest = related[related.length - 1]
     const quote = quotes.get(symbol) ?? unavailable()
     const priceMicro = quote.current_price == null ? null : decFromNumber(quote.current_price, 4)
@@ -140,7 +149,8 @@ export function buildPortfolio(records: TradeRecord[], quotes: ReadonlyMap<strin
     const market = priced ? mulQty(priceMicro, quantity) : null
     const unrealized = market == null ? null : market - costAmount
     positions.push({
-      position_key: symbol,
+      position_key: key,
+      trader,
       code: latest?.code ?? symbol.slice(0, 6),
       symbol,
       name: latest?.name ?? symbol,
@@ -166,6 +176,7 @@ export function stripHistory(rows: BuiltHistory[]): HistoryRow[] {
     history_id: row.history_id,
     sell_record_id: row.sell_record_id,
     buy_record_ids: row.buy_record_ids,
+    trader: row.trader,
     code: row.code,
     symbol: row.symbol,
     name: row.name,

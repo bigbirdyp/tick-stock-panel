@@ -1,5 +1,5 @@
 import { isRealDate } from './calendar'
-import { decFromNumber } from './money'
+import { decFromNumber, decToNumber } from './money'
 import { resolveSymbol } from './symbol'
 import type { FieldError, RecordPatch, RecordWrite, ReviewPatch, ReviewWrite, Side } from './types'
 
@@ -23,6 +23,7 @@ const POSITION_SORTS = new Set(['symbol_asc', 'market_value_desc', 'return_rate_
 const HISTORY_SORTS = new Set(['close_date_desc', 'close_date_asc'])
 
 export interface NormalizedRecord {
+  trader: string
   trade_date: string
   trade_time: string | null
   code: string
@@ -43,6 +44,58 @@ export interface RecordIssue {
   code: string
   message: string
   fields: FieldError[]
+}
+
+const TRADER_MAX = 64
+
+/**
+ * 写入和查询共用 §2.8：trim 后 1–64 个 UTF-16 code unit。
+ * 缺省不会变成「未指定」，那个字面量只属于迁移回填。
+ */
+export function normalizeTrader(value: unknown): { ok: true; value: string } | { ok: false; issue: RecordIssue } {
+  if (typeof value !== 'string') {
+    return {
+      ok: false,
+      issue: {
+        status: 422,
+        code: 'VALIDATION_ERROR',
+        message: 'trader 为必填',
+        fields: [{ path: 'trader', message: '必须是字符串' }],
+      },
+    }
+  }
+  const text = value.trim()
+  if (text.length === 0) {
+    return {
+      ok: false,
+      issue: {
+        status: 422,
+        code: 'VALIDATION_ERROR',
+        message: 'trader 为必填',
+        fields: [{ path: 'trader', message: '不能为空' }],
+      },
+    }
+  }
+  if (text.length > TRADER_MAX) {
+    return {
+      ok: false,
+      issue: {
+        status: 422,
+        code: 'VALIDATION_ERROR',
+        message: '请求字段校验失败',
+        fields: [{ path: 'trader', message: '长度必须是 1 到 64 个字符' }],
+      },
+    }
+  }
+  return { ok: true, value: text }
+}
+
+/** 查询参数缺省表示全部交易者；出现时必须通过与写入相同的 trim / 长度规则。 */
+export function validateTraderFilter(value: string | undefined): { trader?: undefined; issue: RecordIssue } | { trader: string | undefined; issue?: undefined } {
+  if (value == null) return { trader: undefined }
+  const parsed = normalizeTrader(value)
+  if (!parsed.ok) return { issue: parsed.issue }
+  return { trader: parsed.value }
 }
 
 function blankToNull(value: string | null | undefined): string | null {
@@ -131,6 +184,9 @@ function moneyField(fields: FieldError[], path: string, value: number, maxPlaces
 
 export function normalizeRecordWrite(body: RecordWrite): { ok: true; value: NormalizedRecord } | { ok: false; issue: RecordIssue } {
   const fields: FieldError[] = []
+  const traderResult = normalizeTrader(body.trader)
+  const trader = traderResult.ok ? traderResult.value : ''
+  if (!traderResult.ok) fields.push(...traderResult.issue.fields)
   pushDate(fields, 'trade_date', body.trade_date ?? '')
   const tradeTime = blankToNull(body.trade_time)
   if (tradeTime != null && !TIME_RE.test(tradeTime)) {
@@ -159,18 +215,20 @@ export function normalizeRecordWrite(body: RecordWrite): { ok: true; value: Norm
 
   if (fields.length > 0 || priceMicro == null || feeMicro == null || taxMicro == null || symbol == null) {
     const onlyBadCode = fields.length === 1 && fields[0]?.path === 'code' && fields[0].message === '无法识别交易所'
+    const traderRequired = fields.length > 0 && fields.every(field => field.path === 'trader' && (field.message === '不能为空' || field.message === '必须是字符串'))
     return {
       ok: false,
       issue: {
         status: 422,
         code: onlyBadCode ? 'INVALID_STOCK_CODE' : 'VALIDATION_ERROR',
-        message: onlyBadCode ? '股票代码无法规范化' : '请求字段校验失败',
+        message: onlyBadCode ? '股票代码无法规范化' : traderRequired ? 'trader 为必填' : '请求字段校验失败',
         fields,
       },
     }
   }
 
   const normalized: NormalizedRecord = {
+    trader,
     trade_date: body.trade_date,
     trade_time: tradeTime,
     code,
@@ -185,22 +243,25 @@ export function normalizeRecordWrite(body: RecordWrite): { ok: true; value: Norm
     client_request_id: requestId,
     fingerprint: '',
   }
-  normalized.fingerprint = [
+  normalized.fingerprint = JSON.stringify([
+    normalized.trader,
     normalized.trade_date,
-    normalized.trade_time ?? '',
+    normalized.trade_time,
     normalized.code,
+    normalized.symbol,
     normalized.name,
     normalized.side,
-    normalized.priceMicro.toString(),
-    String(normalized.quantity),
-    normalized.feeMicro.toString(),
-    normalized.taxMicro.toString(),
-    normalized.note ?? '',
-  ].join('\u001f')
+    decToNumber(normalized.priceMicro, 4),
+    normalized.quantity,
+    decToNumber(normalized.feeMicro, 2),
+    decToNumber(normalized.taxMicro, 2),
+    normalized.note,
+    normalized.client_request_id,
+  ])
   return { ok: true, value: normalized }
 }
 
-const PATCH_KEYS = ['trade_date', 'trade_time', 'code', 'name', 'side', 'price', 'quantity', 'fee', 'tax', 'note', 'client_request_id'] as const
+const PATCH_KEYS = ['trader', 'trade_date', 'trade_time', 'code', 'name', 'side', 'price', 'quantity', 'fee', 'tax', 'note', 'client_request_id'] as const
 
 export function patchTouchesRecord(body: RecordPatch): boolean {
   return PATCH_KEYS.some(key => Object.prototype.hasOwnProperty.call(body, key))

@@ -31,7 +31,7 @@ const backendTarget = `http://${proxyHost}:${backendPort}`
 const tradeJournalTarget = 'http://127.0.0.1:3022'
 
 // Vite 正则代理优先于通用 /api；仅 docs/api.md §1.1 的路径进 Node。
-const tradeJournalPaths = '^/api/(?:records(?:[/?]|$)|reviews(?:[/?]|$)|positions/(?:current|history)(?:\\?|$))'
+const tradeJournalPaths = '^/api/(?:records(?:[/?]|$)|traders(?:\\?|$)|reviews(?:[/?]|$)|positions/(?:current|history)(?:\\?|$))'
 
 export default defineConfig({
   plugins: [react()],

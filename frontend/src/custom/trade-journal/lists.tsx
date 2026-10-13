@@ -3,6 +3,13 @@ import { Pencil, Trash2 } from 'lucide-react'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { isTradeJournalError } from './errors'
 import type { DailyReview, HistoryRow, Pagination, Position, TradeRecord } from './types'
+import { LEGACY_TRADER_LABEL } from './types'
+
+/** 响应里缺标签时按迁移口径显示，避免旧行空白。有字面量时原样展示，包括「未指定」。 */
+export function traderLabel(trader: string | null | undefined): string {
+  const text = trader?.trim() ?? ''
+  return text === '' ? LEGACY_TRADER_LABEL : text
+}
 
 const money = (value: number | null, digits = 2) => value == null
   ? '—'
@@ -50,10 +57,11 @@ export function PositionTable({ rows }: { rows: Position[] }) {
   return (
     <TableWrap>
       <thead><tr>
-        {['股票', '开仓日', '数量', '成本价', '成本金额', '最近价', '市值', '浮动盈亏', '收益率'].map(label => <th key={label} className={th}>{label}</th>)}
+        {['交易者', '股票', '开仓日', '数量', '成本价', '成本金额', '最近价', '市值', '浮动盈亏', '收益率'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
         <tr key={row.position_key} className="hover:bg-elevated/30">
+          <td className={td}>{traderLabel(row.trader)}</td>
           <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
           <td className={td}>{row.open_date}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
@@ -73,10 +81,11 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
   return (
     <TableWrap>
       <thead><tr>
-        {['股票', '买入日期', '卖出日期', '数量', '成本金额', '净回收', '已实现盈亏', '收益率', '持有天数'].map(label => <th key={label} className={th}>{label}</th>)}
+        {['交易者', '股票', '买入日期', '卖出日期', '数量', '成本金额', '净回收', '已实现盈亏', '收益率', '持有天数'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
         <tr key={row.history_id} className="hover:bg-elevated/30">
+          <td className={td}>{traderLabel(row.trader)}</td>
           <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
           <td className={td}>{row.open_date}</td>
           <td className={td}>{row.close_date}</td>
@@ -96,11 +105,12 @@ export function RecordTable({ rows, onEdit, onDelete }: { rows: TradeRecord[]; o
   return (
     <TableWrap>
       <thead><tr>
-        {['日期 / 时间', '股票', '方向', '价格', '数量', '费用 / 税费', '备注', '操作'].map(label => <th key={label} className={th}>{label}</th>)}
+        {['日期 / 时间', '交易者', '股票', '方向', '价格', '数量', '费用 / 税费', '备注', '操作'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
         <tr key={row.id} className="hover:bg-elevated/30">
           <td className={td}>{row.trade_date}<span className="ml-1 text-muted">{row.trade_time ?? ''}</span></td>
+          <td className={td}>{traderLabel(row.trader)}</td>
           <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
           <td className={td}><span className={row.side === 'buy' ? 'text-bull' : 'text-bear'}>{row.side === 'buy' ? '买入' : '卖出'}</span></td>
           <td className={`${td} font-mono`}>{money(row.price, 4)}</td>

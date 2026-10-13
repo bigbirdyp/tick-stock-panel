@@ -12,6 +12,7 @@ import type {
   ReviewWrite,
   TradeJournalApi,
   TradeRecord,
+  TraderList,
 } from './types'
 
 /**
@@ -22,6 +23,7 @@ export function createHttpTradeJournal(fetchImpl: typeof fetch = fetch): TradeJo
   return {
     mode: 'api',
     listRecords: query => send<RecordList>(fetchImpl, `/api/records${qs(query)}`),
+    listTraders: () => send<TraderList>(fetchImpl, '/api/traders'),
     createRecord: body => send<TradeRecord>(fetchImpl, '/api/records', { method: 'POST', body }),
     patchRecord: (id, body) => send<TradeRecord>(fetchImpl, `/api/records/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
     deleteRecord: (id, expectedVersion) => send<void>(fetchImpl, `/api/records/${encodeURIComponent(id)}${qs({ expected_version: expectedVersion })}`, { method: 'DELETE' }).then(() => undefined),
