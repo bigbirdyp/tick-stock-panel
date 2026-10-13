@@ -530,6 +530,27 @@ cd backend/trade-journal-node
 npm run seed # 写入上述数据文件
 ```
 
+**把 AI 选股结果写成今天的买入记录（`npm run seed-picks`，Node ≥ 20）**
+
+在已启动的交易日记 Node（默认 `http://127.0.0.1:3022`）上，用现有 `POST /api/records` 写入买入记录（契约见 [docs/api.md](./docs/api.md)，本脚本不改契约）。每条记录：交易日为 Asia/Shanghai **今天**、数量 **100** 股、备注形如 `AI选股：<策略名或「文件导入」> + <理由>`、`client_request_id` 为「日期 + 规范 symbol」（相同内容重复提交不新写；内容漂移则按契约返回冲突 / `409 DUPLICATE_RECORD`）。前端页面是 **交易日记**（路由 `/trade-journal`），导入后看 **当前持仓** / **交易记录** 两个栏目，不是单独的「选股」页。
+
+只读访问 TSP 缓存，不触发选股重算或收费分析：允许的 TSP 请求仅为 `GET /api/strategies` 与 `GET /api/screener/cached-result/{strategy_id}`；脚本对日记侧只 `POST /api/records`。默认 TSP 基址 `http://47.95.156.102:5000`（可用 `--tsp-base` 覆盖），日记基址 `http://127.0.0.1:3022`（可用 `--journal` 覆盖）。凭证不要写进命令历史以外的仓库文件。
+
+先在 `backend/trade-journal-node` 下用 `--dry-run` 预览，确认再去掉该开关真实写入：
+
+```bash
+cd backend/trade-journal-node
+
+# TSP 策略缓存：按原始 score 取前 N；买入价用行内 raw_close（未复权收盘价）
+npm run seed-picks -- --from-tsp --strategy '因子组合 · atr_pct' --count 3 --dry-run
+npm run seed-picks -- --from-tsp --strategy '因子组合 · atr_pct' --count 3
+
+# 本地 JSON：每条需 symbol、name、price、reason；策略标签固定为「文件导入」
+npm run seed-picks -- --from-file scripts/picks.sample.json --dry-run
+```
+
+`scripts/picks.sample.json` 是**示例数据**（`sample: true`）：价格为演示数字，不是真实行情。对该文件去掉 `--dry-run` 会把示例买入**持久化**进本机 journal 数据文件，仅适合本机联调，勿当真实持仓。
+
 **2. 仅启动 FastAPI（loopback `127.0.0.1:3018`，不要用 `./dev.sh`）**
 
 按 `backend/uv.lock` 装锁定依赖，再只起后端（不要连带 Vite）：
