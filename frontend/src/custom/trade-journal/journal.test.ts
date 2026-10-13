@@ -3,7 +3,7 @@ import type { UserConfig } from 'vite'
 import viteConfig from '../../../vite.config'
 import { createHttpTradeJournal } from './httpClient'
 import { createMockTradeJournal } from './mockStore'
-import type { RecordPatch, RecordWrite } from './types'
+import type { RecordPatch, RecordWrite, ReviewWrite } from './types'
 import { normalizeRecordWrite, normalizeTradeTime } from './validate'
 
 const buy: RecordWrite = {
@@ -194,15 +194,46 @@ describe('契约形状的开发 mock', () => {
     expect((await api.history({ trader: 'B' })).data.history).toEqual([])
   })
 
-  it('每日复盘唯一日期且删除要求当前版本', async () => {
+  it('同一交易者同一日期不能重复复盘，删除要求当前版本', async () => {
     const api = createMockTradeJournal()
-    const review = await api.createReview({ date: '2026-10-12', content: '成交缩量', tags: ['缩量'] })
-    await expect(api.createReview({ date: '2026-10-12', content: '重复' })).rejects.toMatchObject({ code: 'DUPLICATE_REVIEW' })
+    const review = await api.createReview({ trader: '杨鹏', date: '2026-10-12', content: '成交缩量', tags: ['缩量'] })
+    await expect(api.createReview({ trader: '杨鹏', date: '2026-10-12', content: '重复' })).rejects.toMatchObject({ status: 409, code: 'DUPLICATE_REVIEW' })
     const edited = await api.patchReview(review.data.id, { expected_version: 1, content: '等待放量' })
     expect(edited.data.version).toBe(2)
     await expect(api.deleteReview(review.data.id, 1)).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
     await api.deleteReview(review.data.id, 2)
     expect((await api.listReviews({})).data.pagination.total).toBe(0)
+  })
+
+  it('复盘写入必须带交易者；同日不同交易者可并存，并按交易者过滤和计数', async () => {
+    const api = createMockTradeJournal()
+    await expect(api.createReview({ date: '2026-10-12', content: '缺交易者' } as ReviewWrite)).rejects.toMatchObject({
+      status: 422,
+      code: 'VALIDATION_ERROR',
+      fields: [{ path: 'trader', message: '必填' }],
+    })
+    await expect(api.createReview({ trader: '   ', date: '2026-10-12', content: '空白交易者' })).rejects.toMatchObject({
+      status: 422,
+      code: 'VALIDATION_ERROR',
+      fields: [{ path: 'trader', message: '不能为空' }],
+    })
+
+    const alpha = await api.createReview({ trader: 'A', date: '2026-10-12', content: 'A 的复盘' })
+    const beta = await api.createReview({ trader: 'B', date: '2026-10-12', content: 'B 的复盘' })
+    expect(alpha.status).toBe(201)
+    expect(beta.status).toBe(201)
+    expect((await api.listReviews({})).data.pagination.total).toBe(2)
+    expect((await api.listReviews({ trader: 'A' })).data.reviews).toMatchObject([{ id: alpha.data.id, trader: 'A' }])
+    expect((await api.listReviews({ trader: 'B' })).data.reviews).toMatchObject([{ id: beta.data.id, trader: 'B' }])
+    expect((await api.listReviews({ trader: '没有的人' })).data.pagination.total).toBe(0)
+
+    await api.createRecord({ ...buy, trader: 'A', client_request_id: 'review-count-a' })
+    await api.createReview({ trader: '只复盘', date: '2026-10-13', content: '没有成交记录' })
+    expect((await api.listTraders()).data.traders).toEqual([
+      { trader: 'A', record_count: 1, review_count: 1 },
+      { trader: 'B', record_count: 0, review_count: 1 },
+      { trader: '只复盘', record_count: 0, review_count: 1 },
+    ])
   })
 
   it('拒绝 900901，且 as_of 早于行情日时不使用该行情', async () => {
@@ -279,15 +310,17 @@ describe('同源 HTTP 客户端', () => {
     expect(paths[1]).toBe('/api/records/rec_1?expected_version=2')
   })
 
-  it('记录和持仓查询带上 trader，交易者列表走 /api/traders', async () => {
+  it('记录、持仓和复盘查询带上 trader，交易者列表走 /api/traders', async () => {
     const paths: string[] = []
     const fetchImpl: typeof fetch = async (input) => {
       paths.push(String(input))
       return new Response(JSON.stringify({
         data: {
           records: [],
+          reviews: [],
           traders: [],
           positions: [],
+          history: [],
           as_of: '2026-10-13',
           pagination: { limit: 50, offset: 0, total: 0, has_more: false },
         },
@@ -297,11 +330,13 @@ describe('同源 HTTP 客户端', () => {
     await api.listRecords({ trader: 'A' })
     await api.currentPositions({ trader: 'B' })
     await api.history({ trader: 'C' })
+    await api.listReviews({ trader: 'D' })
     await api.listTraders()
     expect(paths).toEqual([
       '/api/records?trader=A',
       '/api/positions/current?trader=B',
       '/api/positions/history?trader=C',
+      '/api/reviews?trader=D',
       '/api/traders',
     ])
   })
