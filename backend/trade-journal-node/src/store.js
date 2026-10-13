@@ -115,11 +115,11 @@ function sameTrader(value, trader) {
 }
 
 function retargetRequestKey(draft, recordId, previousKey, nextKey, snapshot) {
-  if (nextKey === previousKey) return;
   if (nextKey === null) {
     draft.requests = draft.requests.filter((request) => request.recordId !== recordId);
     return;
   }
+  if (nextKey === previousKey) return;
   const existing = draft.requests.find((request) => request.key === nextKey);
   if (existing) {
     if (existing.recordId !== recordId) throw duplicateRecord();
@@ -152,9 +152,9 @@ export class JournalStore {
     const loaded = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : emptyState();
     assertStateShape(loaded);
     const migrated = migrateState(loaded);
+    derive(migrated.records);
     if (migrated !== loaded) persist(filePath, migrated);
     this.state = migrated;
-    derive(this.state.records);
     this.lastTimestampMs = 0;
     for (const item of [...this.state.records, ...this.state.reviews]) {
       this.lastTimestampMs = Math.max(this.lastTimestampMs, Date.parse(item.created_at), Date.parse(item.updated_at));

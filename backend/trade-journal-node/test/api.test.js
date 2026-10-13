@@ -521,6 +521,35 @@ function legacyFingerprint(record) {
   ]);
 }
 
+test('v1 migration validates per-trader FIFO before rewriting the journal file', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'trade-journal-test-'));
+  const filePath = join(directory, 'journal.json');
+  try {
+    const initial = {
+      schema_version: 1,
+      records: [
+        legacyRecord({
+          id: 'rec_buy_a', trader: '甲', trade_date: '2025-01-06', code: '600519', symbol: '600519.SH',
+          name: '贵州茅台', side: 'buy', price: '10', quantity: 100, client_request_id: null,
+        }),
+        legacyRecord({
+          id: 'rec_sell_b', trader: '乙', trade_date: '2025-01-07', code: '600519', symbol: '600519.SH',
+          name: '贵州茅台', side: 'sell', price: '11', quantity: 100, client_request_id: null,
+        }),
+      ],
+      reviews: [],
+      requests: [],
+    };
+    const originalBytes = JSON.stringify(initial, null, 2) + '\n';
+    writeFileSync(filePath, originalBytes);
+
+    assert.throws(() => new JournalStore(filePath), /卖出 乙 600519\.SH 超过此前持仓/);
+    assert.equal(readFileSync(filePath, 'utf8'), originalBytes);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('v1 journal migrates traders and creation fingerprints without rewriting economics', async (t) => {
   const review = {
     id: 'rev_keep', version: 4, date: '2025-01-08', content: '保留复盘', tags: ['复盘'],
@@ -757,4 +786,34 @@ test('request keys keep the creation fingerprint through price edits, A→B→A,
     ...input, price: 11, client_request_id: 'key-b', code: '000001', name: '平安银行',
   });
   assert.equal(reusedB.status, 201);
+});
+
+test('explicit client_request_id null clears legacy mappings even when the current key is already null', async (t) => {
+  const record = legacyRecord({
+    id: 'rec_null_key', trader: '示例', trade_date: '2025-01-06', code: '600519', symbol: '600519.SH',
+    name: '贵州茅台', side: 'buy', price: '10', quantity: 100, client_request_id: null,
+  });
+  const { request, store } = await harness(t, {
+    schema_version: 2,
+    records: [record],
+    reviews: [],
+    requests: [{
+      key: 'legacy-key',
+      recordId: 'rec_null_key',
+      fingerprint: JSON.stringify([
+        '示例', '2025-01-06', null, '600519', '600519.SH', '贵州茅台',
+        'buy', '10', 100, '0', '0', null, 'legacy-key',
+      ]),
+    }],
+  });
+
+  const cleared = await request('PATCH', '/api/records/rec_null_key', { expected_version: 1, client_request_id: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.data.client_request_id, null);
+  assert.deepEqual(store.state.requests.filter((item) => item.recordId === 'rec_null_key'), []);
+
+  const reused = await request('POST', '/api/records', trade({
+    code: '000001', name: '平安银行', fee: 0, client_request_id: 'legacy-key',
+  }));
+  assert.equal(reused.status, 201);
 });
