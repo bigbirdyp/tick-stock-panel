@@ -3,7 +3,7 @@ import type { UserConfig } from 'vite'
 import viteConfig from '../../../vite.config'
 import { createHttpTradeJournal } from './httpClient'
 import { createMockTradeJournal } from './mockStore'
-import type { RecordWrite } from './types'
+import type { RecordPatch, RecordWrite } from './types'
 import { normalizeRecordWrite, normalizeTradeTime } from './validate'
 
 const buy: RecordWrite = {
@@ -100,6 +100,19 @@ describe('契约形状的开发 mock', () => {
     expect(changed.data.version).toBe(2)
     await expect(api.patchRecord(first.data.id, { expected_version: 1, note: '旧版本' })).rejects.toMatchObject({ code: 'VERSION_CONFLICT', status: 409 })
     await expect(api.createRecord({ ...buy, side: 'sell', quantity: 101, client_request_id: 'oversell' })).rejects.toMatchObject({ code: 'INSUFFICIENT_POSITION', status: 409 })
+  })
+
+  it('PATCH 显式传入 trader null 时按契约返回 422，不沿用原交易者', async () => {
+    const api = createMockTradeJournal()
+    const first = await api.createRecord(buy)
+
+    await expect(api.patchRecord(first.data.id, { expected_version: 1, trader: null } as unknown as RecordPatch)).rejects.toMatchObject({
+      status: 422,
+      code: 'VALIDATION_ERROR',
+      fields: [{ path: 'trader', message: '必须是字符串' }],
+    })
+    const records = (await api.listRecords({})).data.records
+    expect(records).toMatchObject([{ id: first.data.id, version: 1, trader: '杨鹏' }])
   })
 
   it('PATCH 后重放原始 POST 仍命中创建指纹，并返回当前记录', async () => {
