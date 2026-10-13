@@ -11,14 +11,21 @@ interface TraderTabsProps {
 }
 
 /**
- * 交易记录、持仓和历史收益共用的交易者切换。
- * 第一项固定为「全部」，其余按服务端给出的顺序展示标签和条数。
- * 与栏目 tab 分开，避免左右键把两个列表混在一起。
+ * 外层交易者页签。第一项固定为「全部」，条数是各标签 record_count 之和。
+ * 其余按记录数从多到少；记录数相同则按标签的 UTF-16 code unit 升序。
+ * GET /api/traders 本身不按记录数排序，这个次序只在客户端决定。
  */
 export function TraderTabs({ traders, selected, loading, error, onSelect, onRetry }: TraderTabsProps) {
+  const sorted = [...traders].sort((left, right) => {
+    if (left.record_count !== right.record_count) return right.record_count - left.record_count
+    if (left.trader < right.trader) return -1
+    if (left.trader > right.trader) return 1
+    return 0
+  })
+  const recordTotal = sorted.reduce((sum, item) => sum + item.record_count, 0)
   const items = [
-    { key: '', label: '全部', count: null as number | null },
-    ...traders.map(item => ({ key: item.trader, label: item.trader, count: item.record_count })),
+    { key: '', label: '全部', count: recordTotal },
+    ...sorted.map(item => ({ key: item.trader, label: item.trader, count: item.record_count })),
   ]
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -36,7 +43,7 @@ export function TraderTabs({ traders, selected, loading, error, onSelect, onRetr
   }
 
   return (
-    <div className="space-y-2 border-b border-border px-4 py-3">
+    <div className="space-y-2">
       <div role="tablist" aria-label="交易者" onKeyDown={onKeyDown} className="flex flex-wrap gap-1">
         {items.map(item => {
           const active = item.key === '' ? selected == null : item.key === selected
@@ -51,7 +58,7 @@ export function TraderTabs({ traders, selected, loading, error, onSelect, onRetr
               className={`rounded px-3 py-1.5 text-xs font-medium ${active ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
             >
               {item.label}
-              {item.count != null && <span className="ml-1 tabular-nums text-muted"> {item.count}</span>}
+              <span className="ml-1 tabular-nums text-muted"> {item.count}</span>
             </button>
           )
         })}
