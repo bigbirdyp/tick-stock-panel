@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react'
+import { useEffect, useState, type KeyboardEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Modal } from '@/components/Modal'
@@ -152,6 +152,15 @@ export function TradeJournalPage() {
     setHistoryQuery(query => withTrader(query, trader))
     setRecordQuery(query => withTrader(query, trader))
   }
+
+  useEffect(() => {
+    const selected = recordQuery.trader
+    if (!selected || !traders.isSuccess || traders.isFetching) return
+    if (traders.data.data.traders.some(item => item.trader === selected)) return
+    setPositionQuery(query => withTrader(query, undefined))
+    setHistoryQuery(query => withTrader(query, undefined))
+    setRecordQuery(query => withTrader(query, undefined))
+  }, [recordQuery.trader, traders.data, traders.isSuccess, traders.isFetching])
 
   const applyCode = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()

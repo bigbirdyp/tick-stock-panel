@@ -157,3 +157,52 @@ it('交易者页签按全部、A、B 过滤记录和持仓，新建表单沿用�
   await vi.waitFor(() => expect(container.textContent).toContain('指数缩量震荡'))
   expect(traderList()).toBeNull()
 })
+
+it('删除当前交易者最后一条记录后，交易者页签回到全部', async () => {
+  notifyManager.setNotifyFunction(callback => { act(callback) })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  dispose = async () => {
+    await act(async () => root.unmount())
+    client.clear()
+    container.remove()
+  }
+
+  await act(async () => {
+    root.render(<QueryClientProvider client={client}><TradeJournalPage /></QueryClientProvider>)
+  })
+
+  const traderList = () => container.querySelector('[aria-label="交易者"]')
+  const traderButtons = () => Array.from(traderList()?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])
+  const traderName = (button: HTMLButtonElement) => (button.textContent ?? '').replace(/\s+\d+$/, '').trim()
+  const selectedTraderNames = () => traderButtons()
+    .filter(button => button.getAttribute('aria-selected') === 'true')
+    .map(traderName)
+  const clickTrader = async (label: string) => {
+    const button = traderButtons().find(item => traderName(item) === label)
+    expect(button, label).toBeDefined()
+    await act(async () => button!.click())
+  }
+  const clickColumn = async (label: string) => {
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易日记栏目"] [role="tab"]')).find(item => item.textContent === label)
+    expect(button, label).toBeDefined()
+    await act(async () => button!.click())
+  }
+
+  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', 'AI选股:atr_pct', '杨鹏']))
+  await clickTrader('AI选股:atr_pct')
+  await clickColumn('交易记录')
+  await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
+
+  const deleteButton = container.querySelector<HTMLButtonElement>('[aria-label="删除 贵州茅台 2026-10-12 交易记录"]')
+  expect(deleteButton).not.toBeNull()
+  await act(async () => deleteButton!.click())
+  const confirmDelete = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent === '删除')
+  expect(confirmDelete).toBeDefined()
+  await act(async () => confirmDelete!.click())
+
+  await vi.waitFor(() => expect(traderButtons().map(traderName)).toEqual(['全部', '杨鹏']))
+  expect(selectedTraderNames()).toEqual(['全部'])
+})

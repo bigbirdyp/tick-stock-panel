@@ -243,8 +243,9 @@ export function createMockTradeJournal(seeded = false): TradeJournalApi {
       if (!patchTouchesRecord(body)) {
         fail({ status: 422, code: 'VALIDATION_ERROR', message: '请求字段校验失败', fields: [{ path: 'expected_version', message: '至少修改一个字段' }] })
       }
+      const hasTrader = Object.prototype.hasOwnProperty.call(body, 'trader')
       const merged: RecordWrite = {
-        trader: body.trader ?? current.trader,
+        trader: hasTrader ? (body as RecordPatch & { trader: string }).trader : current.trader,
         trade_date: body.trade_date ?? current.trade_date,
         trade_time: Object.prototype.hasOwnProperty.call(body, 'trade_time') ? body.trade_time : current.trade_time,
         code: body.code ?? current.code,
