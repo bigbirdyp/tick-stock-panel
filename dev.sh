@@ -207,7 +207,7 @@ PGIDS+=("$!")
   cd "$TRADE_JOURNAL_DIR"
   # 用 exec 保持 $! 为 Node 本身；退出时 cleanup 可直接终止它。
   export TRADE_JOURNAL_PORT=3022
-  exec node src/index.js > >(prefix_awk "$(printf "${YELLOW}[journal ]${NC} ")") 2>&1
+  exec node --watch src/index.js > >(prefix_awk "$(printf "${YELLOW}[journal ]${NC} ")") 2>&1
 ) &
 PGIDS+=("$!")
 
