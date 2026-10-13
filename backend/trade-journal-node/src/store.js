@@ -267,7 +267,7 @@ export class JournalStore {
   }
 
   createReview(input) {
-    if (this.state.reviews.some((item) => item.date === input.date)) throw new ApiError(409, 'DUPLICATE_REVIEW', '该日期已有每日复盘');
+    if (reviewKeyTaken(this.state.reviews, input.date, input.trader)) throw duplicateReview();
     const draft = structuredClone(this.state);
     const timestamp = this.timestamp();
     const review = { id: `rev_${randomUUID()}`, version: 1, ...input, created_at: timestamp, updated_at: timestamp };
@@ -287,7 +287,8 @@ export class JournalStore {
       (!query.date || review.date === query.date) &&
       (!query.from || review.date >= query.from) &&
       (!query.to || review.date <= query.to) &&
-      (!query.tag || review.tags.includes(query.tag)));
+      (!query.tag || review.tags.includes(query.tag)) &&
+      sameTrader(review.trader, query.trader));
     const result = page(sortReviews(filtered, query.sort), query);
     return { reviews: result.items, pagination: result.pagination };
   }
@@ -297,9 +298,9 @@ export class JournalStore {
     if (!current) throw notFound();
     if (current.version !== changes.expected_version) throw versionConflict();
     const { expected_version, ...fields } = changes;
-    if (fields.date && fields.date !== current.date && this.state.reviews.some((item) => item.date === fields.date)) {
-      throw new ApiError(409, 'DUPLICATE_REVIEW', '该日期已有每日复盘');
-    }
+    const nextDate = Object.hasOwn(fields, 'date') ? fields.date : current.date;
+    const nextTrader = Object.hasOwn(fields, 'trader') ? fields.trader : current.trader;
+    if (reviewKeyTaken(this.state.reviews, nextDate, nextTrader, id)) throw duplicateReview();
     const draft = structuredClone(this.state);
     const index = draft.reviews.findIndex((item) => item.id === id);
     const updated = { ...draft.reviews[index], ...fields, version: current.version + 1, updated_at: this.timestamp() };
@@ -318,9 +319,15 @@ export class JournalStore {
   }
 
   listTraders() {
-    const counts = new Map();
-    for (const record of this.state.records) counts.set(record.trader, (counts.get(record.trader) ?? 0) + 1);
-    const traders = [...counts.keys()].sort().map((trader) => ({ trader, record_count: counts.get(trader) }));
+    const recordCounts = new Map();
+    const reviewCounts = new Map();
+    for (const record of this.state.records) recordCounts.set(record.trader, (recordCounts.get(record.trader) ?? 0) + 1);
+    for (const review of this.state.reviews) reviewCounts.set(review.trader, (reviewCounts.get(review.trader) ?? 0) + 1);
+    const traders = [...new Set([...recordCounts.keys(), ...reviewCounts.keys()])].sort().map((trader) => ({
+      trader,
+      record_count: recordCounts.get(trader) ?? 0,
+      review_count: reviewCounts.get(trader) ?? 0,
+    }));
     return { traders };
   }
 
