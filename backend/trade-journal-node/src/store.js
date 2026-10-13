@@ -4,13 +4,15 @@ import { dirname } from 'node:path';
 import { ApiError } from './validation.js';
 import { currentPositions, derive, publicHistory, sortHistory, sortPositions, sortRecords, sortReviews } from './positions.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
 const UNSPECIFIED_TRADER = '未指定';
 const TRADER_MAX = 64;
 const emptyState = () => ({ schema_version: SCHEMA_VERSION, records: [], reviews: [], requests: [] });
 const notFound = () => new ApiError(404, 'NOT_FOUND', '指定资源不存在');
 const versionConflict = () => new ApiError(409, 'VERSION_CONFLICT', '资源版本已变化，请重新加载');
 const duplicateRecord = () => new ApiError(409, 'DUPLICATE_RECORD', 'client_request_id 已用于其他交易记录');
+const duplicateReview = () => new ApiError(409, 'DUPLICATE_REVIEW', '该日期下该交易者已有每日复盘');
 
 function shanghaiTimestamp(milliseconds) {
   return new Date(milliseconds + 8 * 60 * 60 * 1000).toISOString().replace('Z', '+08:00');
@@ -48,7 +50,7 @@ function canonicalTrader(value) {
 
 function assertStateShape(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('invalid trade journal data file');
-  if (state.schema_version !== 1 && state.schema_version !== SCHEMA_VERSION) throw new Error('invalid trade journal data file');
+  if (!SUPPORTED_SCHEMA_VERSIONS.has(state.schema_version)) throw new Error('invalid trade journal data file');
   if (!Array.isArray(state.records) || !Array.isArray(state.reviews) || !Array.isArray(state.requests)) {
     throw new Error('invalid trade journal data file');
   }
@@ -59,6 +61,27 @@ function repairRecord(record) {
   const trader = canonicalTrader(record.trader) ?? UNSPECIFIED_TRADER;
   if (record.trader === trader) return record;
   return { ...record, trader };
+}
+
+function repairReview(review) {
+  if (!review || typeof review !== 'object' || Array.isArray(review)) throw new Error('invalid trade journal data file');
+  const trader = canonicalTrader(review.trader) ?? UNSPECIFIED_TRADER;
+  if (review.trader === trader) return review;
+  return { ...review, trader };
+}
+
+// A joined string can collide when a label itself contains the separator.
+function assertUniqueReviewKeys(reviews) {
+  const seen = new Set();
+  for (const review of reviews) {
+    const key = JSON.stringify([review.date, review.trader]);
+    if (seen.has(key)) throw new Error('invalid trade journal data file: duplicate review date and trader');
+    seen.add(key);
+  }
+}
+
+function reviewKeyTaken(reviews, date, trader, exceptId) {
+  return reviews.some((item) => item.id !== exceptId && item.date === date && item.trader === trader);
 }
 
 function parseFingerprint(value) {
@@ -100,12 +123,16 @@ function migrateState(state) {
   const recordsChanged = records.some((record, index) => record !== state.records[index]);
   const traderById = new Map(records.map((record) => [record.id, record.trader]));
   const upgraded = upgradeRequests(state.requests, traderById);
-  if (state.schema_version === SCHEMA_VERSION && !recordsChanged && !upgraded.changed) return state;
+  const reviews = state.reviews.map(repairReview);
+  const reviewsChanged = reviews.some((review, index) => review !== state.reviews[index]);
+  // Reject before returning a writable state so a duplicate key cannot be persisted or served.
+  assertUniqueReviewKeys(reviews);
+  if (state.schema_version === SCHEMA_VERSION && !recordsChanged && !upgraded.changed && !reviewsChanged) return state;
   return {
     ...state,
     schema_version: SCHEMA_VERSION,
     records: recordsChanged ? records : state.records,
-    reviews: state.reviews,
+    reviews: reviewsChanged ? reviews : state.reviews,
     requests: upgraded.requests,
   };
 }
