@@ -66,16 +66,26 @@ export function stockCode(value, path = 'code') {
   return { code: value, symbol: `${value}.${exchange}` };
 }
 
-const recordFields = ['trade_date', 'trade_time', 'code', 'symbol', 'name', 'side', 'price', 'quantity', 'fee', 'tax', 'note', 'client_request_id'];
+const TRADER_MAX = 64;
+const recordFields = ['trader', 'trade_date', 'trade_time', 'code', 'symbol', 'name', 'side', 'price', 'quantity', 'fee', 'tax', 'note', 'client_request_id'];
+
+function traderField(value, path = 'trader') {
+  if (typeof value !== 'string') throw invalid(path, '必须是字符串');
+  const trimmed = value.trim();
+  if (trimmed.length === 0) throw invalid(path, '不能为空白');
+  if (trimmed.length > TRADER_MAX) throw invalid(path, '长度必须为 1 到 64 个字符');
+  return trimmed;
+}
 
 export function recordInput(value, patch = false) {
   const body = objectBody(value);
   allowedKeys(body, patch ? [...recordFields.filter((key) => key !== 'symbol'), 'expected_version'] : recordFields);
   if (patch && !own(body, 'expected_version')) throw new ApiError(428, 'PRECONDITION_REQUIRED', '缺少 expected_version');
   if (patch && Object.keys(body).length < 2) throw invalid('$', '至少提交一个可写字段');
-  if (!patch) for (const key of ['trade_date', 'code', 'name', 'side', 'price', 'quantity']) if (!own(body, key)) throw invalid(key, '必填');
+  if (!patch) for (const key of ['trader', 'trade_date', 'code', 'name', 'side', 'price', 'quantity']) if (!own(body, key)) throw invalid(key, '必填');
   const result = {};
   if (patch) result.expected_version = integerField(body.expected_version, 'expected_version', 1);
+  if (own(body, 'trader')) result.trader = traderField(body.trader);
   if (own(body, 'trade_date')) result.trade_date = dateField(body.trade_date, 'trade_date');
   if (own(body, 'trade_time')) result.trade_time = timeField(body.trade_time);
   if (own(body, 'code')) Object.assign(result, stockCode(body.code));
@@ -128,10 +138,10 @@ export function versionQuery(params) {
 
 export function listQuery(params, kind) {
   const choices = {
-    records: { fields: ['date', 'from', 'to', 'code', 'side'], sorts: ['trade_date_desc', 'trade_date_asc'] },
+    records: { fields: ['trader', 'date', 'from', 'to', 'code', 'side'], sorts: ['trade_date_desc', 'trade_date_asc'] },
     reviews: { fields: ['date', 'from', 'to', 'tag'], sorts: ['date_desc', 'date_asc'] },
-    current: { fields: ['as_of', 'code'], sorts: ['symbol_asc', 'market_value_desc', 'return_rate_desc'] },
-    history: { fields: ['from', 'to', 'code'], sorts: ['close_date_desc', 'close_date_asc'] },
+    current: { fields: ['as_of', 'trader', 'code'], sorts: ['symbol_asc', 'market_value_desc', 'return_rate_desc'] },
+    history: { fields: ['from', 'to', 'trader', 'code'], sorts: ['close_date_desc', 'close_date_asc'] },
   }[kind];
   for (const key of params.keys()) {
     if (![...choices.fields, 'limit', 'offset', 'sort'].includes(key)) throw invalid(key, '不支持此查询参数');
@@ -142,6 +152,7 @@ export function listQuery(params, kind) {
   for (const key of ['date', 'from', 'to', 'as_of']) if (own(result, key)) result[key] = dateField(result[key], key);
   if (result.from && result.to && result.from > result.to) throw new ApiError(422, 'INVALID_DATE', '起始日期不能晚于结束日期');
   if (own(result, 'code')) stockCode(result.code);
+  if (own(result, 'trader')) result.trader = traderField(result.trader);
   if (own(result, 'side') && !['buy', 'sell'].includes(result.side)) throw invalid('side', '必须是 buy 或 sell');
   if (own(result, 'tag')) result.tag = textField(result.tag, 'tag', 1, 30);
   for (const key of ['limit', 'offset']) if (params.has(key)) {
@@ -154,4 +165,9 @@ export function listQuery(params, kind) {
     if (!choices.sorts.includes(result.sort)) throw invalid('sort', '不支持此排序');
   }
   return result;
+}
+
+export function tradersQuery(params) {
+  for (const key of params.keys()) throw invalid(key, '不支持此查询参数');
+  return {};
 }

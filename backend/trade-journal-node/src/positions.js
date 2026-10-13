@@ -35,10 +35,11 @@ export function derive(records) {
   const bySymbol = new Map();
   const history = [];
   for (const record of sortRecords(records)) {
-    let state = bySymbol.get(record.symbol);
+    const bookKey = `${record.trader}\u001f${record.symbol}`;
+    let state = bySymbol.get(bookKey);
     if (!state) {
-      state = { code: record.code, symbol: record.symbol, name: record.name, lots: [] };
-      bySymbol.set(record.symbol, state);
+      state = { trader: record.trader, code: record.code, symbol: record.symbol, name: record.name, lots: [] };
+      bySymbol.set(bookKey, state);
     }
     state.name = record.name;
     if (record.side === 'buy') {
@@ -69,7 +70,7 @@ export function derive(records) {
       openDate = openDate === null || lot.openDate < openDate ? lot.openDate : openDate;
       buyIds.push(lot.recordId);
     }
-    if (remaining > 0) throw new ApiError(409, 'INSUFFICIENT_POSITION', `卖出 ${record.symbol} 超过此前持仓`);
+    if (remaining > 0) throw new ApiError(409, 'INSUFFICIENT_POSITION', `卖出 ${record.trader} ${record.symbol} 超过此前持仓`);
     state.lots = state.lots.filter((lot) => lot.quantity > 0);
     const exitAmount = decimalUnits(record.price) * BigInt(record.quantity) - decimalUnits(record.fee) - decimalUnits(record.tax);
     // Subtract the exact 1e-8 amounts. Rounding each side to cents first turns
@@ -79,6 +80,7 @@ export function derive(records) {
       history_id: record.id,
       sell_record_id: record.id,
       buy_record_ids: buyIds,
+      trader: record.trader,
       code: record.code,
       symbol: record.symbol,
       name: record.name,
@@ -107,7 +109,8 @@ export function currentPositions(records) {
     const quantity = state.lots.reduce((total, lot) => total + lot.quantity, 0);
     const costAmount = state.lots.reduce((total, lot) => total + lot.costAmount, 0n);
     positions.push({
-      position_key: state.symbol,
+      position_key: `${state.trader}\u001f${state.symbol}`,
+      trader: state.trader,
       code: state.code,
       symbol: state.symbol,
       name: state.name,
@@ -128,11 +131,12 @@ export function currentPositions(records) {
 }
 
 export function sortPositions(positions, order) {
+  const identity = [['symbol', 1], ['trader', 1], ['position_key', 1]];
   const keys = order === 'market_value_desc'
-    ? [['market_value', -1], ['symbol', 1], ['position_key', 1]]
+    ? [['market_value', -1], ...identity]
     : order === 'return_rate_desc'
-      ? [['return_rate', -1], ['symbol', 1], ['position_key', 1]]
-      : [['symbol', 1], ['position_key', 1]];
+      ? [['return_rate', -1], ...identity]
+      : identity;
   return [...positions].sort((a, b) => compareKeys(a, b, keys));
 }
 

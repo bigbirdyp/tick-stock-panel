@@ -4,9 +4,13 @@ import { dirname } from 'node:path';
 import { ApiError } from './validation.js';
 import { currentPositions, derive, publicHistory, sortHistory, sortPositions, sortRecords, sortReviews } from './positions.js';
 
-const emptyState = () => ({ schema_version: 1, records: [], reviews: [], requests: [] });
+const SCHEMA_VERSION = 2;
+const UNSPECIFIED_TRADER = '未指定';
+const TRADER_MAX = 64;
+const emptyState = () => ({ schema_version: SCHEMA_VERSION, records: [], reviews: [], requests: [] });
 const notFound = () => new ApiError(404, 'NOT_FOUND', '指定资源不存在');
 const versionConflict = () => new ApiError(409, 'VERSION_CONFLICT', '资源版本已变化，请重新加载');
+const duplicateRecord = () => new ApiError(409, 'DUPLICATE_RECORD', 'client_request_id 已用于其他交易记录');
 
 function shanghaiTimestamp(milliseconds) {
   return new Date(milliseconds + 8 * 60 * 60 * 1000).toISOString().replace('Z', '+08:00');
@@ -29,10 +33,99 @@ function publicRecord(record) {
 
 function recordFingerprint(record) {
   return JSON.stringify([
-    record.trade_date, record.trade_time, record.code, record.symbol, record.name,
+    record.trader, record.trade_date, record.trade_time, record.code, record.symbol, record.name,
     record.side, record.price, record.quantity, record.fee, record.tax,
     record.note, record.client_request_id,
   ]);
+}
+
+function canonicalTrader(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length < 1 || trimmed.length > TRADER_MAX) return null;
+  return trimmed;
+}
+
+function assertStateShape(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('invalid trade journal data file');
+  if (state.schema_version !== 1 && state.schema_version !== SCHEMA_VERSION) throw new Error('invalid trade journal data file');
+  if (!Array.isArray(state.records) || !Array.isArray(state.reviews) || !Array.isArray(state.requests)) {
+    throw new Error('invalid trade journal data file');
+  }
+}
+
+function repairRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('invalid trade journal data file');
+  const trader = canonicalTrader(record.trader) ?? UNSPECIFIED_TRADER;
+  if (record.trader === trader) return record;
+  return { ...record, trader };
+}
+
+function parseFingerprint(value) {
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed) && (parsed.length === 12 || parsed.length === 13)) return parsed;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+// Copy the stored twelve creation elements and prepend the migrated trader.
+// Rebuilding them from the record would pin later PATCH prices into the key.
+function upgradeRequests(requests, traderById) {
+  const liveIds = new Set(traderById.keys());
+  const next = [];
+  let changed = false;
+  for (const request of requests) {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('invalid trade journal data file');
+    if (!liveIds.has(request.recordId)) {
+      changed = true;
+      continue;
+    }
+    const parsed = parseFingerprint(request.fingerprint);
+    if (!parsed || parsed.length === 13) {
+      next.push(request);
+      continue;
+    }
+    changed = true;
+    next.push({ ...request, fingerprint: JSON.stringify([traderById.get(request.recordId), ...parsed]) });
+  }
+  return { requests: changed ? next : requests, changed };
+}
+
+function migrateState(state) {
+  const records = state.records.map(repairRecord);
+  const recordsChanged = records.some((record, index) => record !== state.records[index]);
+  const traderById = new Map(records.map((record) => [record.id, record.trader]));
+  const upgraded = upgradeRequests(state.requests, traderById);
+  if (state.schema_version === SCHEMA_VERSION && !recordsChanged && !upgraded.changed) return state;
+  return {
+    ...state,
+    schema_version: SCHEMA_VERSION,
+    records: recordsChanged ? records : state.records,
+    reviews: state.reviews,
+    requests: upgraded.requests,
+  };
+}
+
+function sameTrader(value, trader) {
+  return trader === undefined || value === trader;
+}
+
+function retargetRequestKey(draft, recordId, previousKey, nextKey, snapshot) {
+  if (nextKey === previousKey) return;
+  if (nextKey === null) {
+    draft.requests = draft.requests.filter((request) => request.recordId !== recordId);
+    return;
+  }
+  const existing = draft.requests.find((request) => request.key === nextKey);
+  if (existing) {
+    if (existing.recordId !== recordId) throw duplicateRecord();
+    return;
+  }
+  draft.requests.push({ key: nextKey, recordId, fingerprint: recordFingerprint(snapshot) });
 }
 
 function persist(filePath, state) {
@@ -56,11 +149,11 @@ function persist(filePath, state) {
 export class JournalStore {
   constructor(filePath) {
     this.filePath = filePath;
-    this.state = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : emptyState();
-    if (this.state.schema_version !== 1 || !Array.isArray(this.state.records) || !Array.isArray(this.state.reviews) ||
-        !Array.isArray(this.state.requests)) {
-      throw new Error('invalid trade journal data file');
-    }
+    const loaded = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : emptyState();
+    assertStateShape(loaded);
+    const migrated = migrateState(loaded);
+    if (migrated !== loaded) persist(filePath, migrated);
+    this.state = migrated;
     derive(this.state.records);
     this.lastTimestampMs = 0;
     for (const item of [...this.state.records, ...this.state.reviews]) {
@@ -110,7 +203,8 @@ export class JournalStore {
       (!query.from || record.trade_date >= query.from) &&
       (!query.to || record.trade_date <= query.to) &&
       (!query.code || record.code === query.code) &&
-      (!query.side || record.side === query.side));
+      (!query.side || record.side === query.side) &&
+      sameTrader(record.trader, query.trader));
     const result = page(sortRecords(filtered, query.sort), query);
     return { records: result.items.map(publicRecord), pagination: result.pagination };
   }
@@ -120,17 +214,16 @@ export class JournalStore {
     if (!current) throw notFound();
     if (current.version !== changes.expected_version) throw versionConflict();
     const { expected_version, ...fields } = changes;
-    const key = fields.client_request_id;
-    const matchingRequest = key ? this.state.requests.find((item) => item.key === key) : null;
-    if (matchingRequest && matchingRequest.recordId !== id) {
-      throw new ApiError(409, 'DUPLICATE_RECORD', 'client_request_id 已用于其他交易记录');
+    if (Object.hasOwn(fields, 'client_request_id') && fields.client_request_id && fields.client_request_id !== current.client_request_id) {
+      const existing = this.state.requests.find((item) => item.key === fields.client_request_id);
+      if (existing && existing.recordId !== id) throw duplicateRecord();
     }
     const draft = structuredClone(this.state);
     const index = draft.records.findIndex((item) => item.id === id);
     const updated = { ...draft.records[index], ...fields, version: current.version + 1, updated_at: this.timestamp() };
     draft.records[index] = updated;
-    if (key && !matchingRequest) {
-      draft.requests.push({ key, recordId: id, fingerprint: recordFingerprint(updated) });
+    if (Object.hasOwn(fields, 'client_request_id')) {
+      retargetRequestKey(draft, id, current.client_request_id ?? null, fields.client_request_id, updated);
     }
     this.commit(draft);
     return publicRecord(updated);
@@ -197,10 +290,18 @@ export class JournalStore {
     this.commit(draft);
   }
 
+  listTraders() {
+    const counts = new Map();
+    for (const record of this.state.records) counts.set(record.trader, (counts.get(record.trader) ?? 0) + 1);
+    const traders = [...counts.keys()].sort().map((trader) => ({ trader, record_count: counts.get(trader) }));
+    return { traders };
+  }
+
   current(query) {
     const asOf = query.as_of ?? todayShanghai();
     const records = this.state.records.filter((record) => record.trade_date <= asOf);
-    const filtered = currentPositions(records).filter((position) => !query.code || position.code === query.code);
+    const filtered = currentPositions(records).filter((position) =>
+      (!query.code || position.code === query.code) && sameTrader(position.trader, query.trader));
     const result = page(sortPositions(filtered, query.sort), query);
     return { as_of: asOf, positions: result.items, pagination: result.pagination };
   }
@@ -209,7 +310,8 @@ export class JournalStore {
     const filtered = derive(this.state.records).history.filter((row) =>
       (!query.from || row.close_date >= query.from) &&
       (!query.to || row.close_date <= query.to) &&
-      (!query.code || row.code === query.code));
+      (!query.code || row.code === query.code) &&
+      sameTrader(row.trader, query.trader));
     const result = page(sortHistory(filtered, query.sort), query);
     return { history: result.items.map(publicHistory), pagination: result.pagination };
   }
