@@ -1,28 +1,28 @@
 # 股票记录小应用 API（设计契约）
 
-> 状态：本地开发路径已实现——`backend/trade-journal-node`（仅 `127.0.0.1:3022`）提供本文 `/api/records`、`/api/reviews`、`/api/traders`、`/api/positions/*`；Vite 开发代理按路径把这些请求转到 Node，其余 `/api` 仍走 FastAPI。生产或对外暴露所需的上游认证与同源路由边界仍须由网关/反向代理等另行落地；本契约不声称生产认证已实现。交易记录 `trader`、FIFO 分账和 `schema_version` 2 以当前 Node 为准。每日复盘 `trader`、`(date, trader)` 唯一性、`review_count` 和 `schema_version` 3 以本文 §4 与 §8.4 为准；后端按该契约改完之前，正在运行的进程仍可能按「复盘无 `trader`、同一日期全局一条、交易者列表只计 `record_count`」工作。
+> 状态：交易日志接口统一由 FastAPI **3018** 接入，经现有访问密码 / 会话认证后反向代理到内部 `backend/trade-journal-node`（仅 `127.0.0.1:3022`）。Vite 全部 `/api` 与 `/health` 均转发到 3018；Docker 单容器管理 FastAPI 与 Node，仅发布 3018。账本仍由 Node 实现，交易记录 `trader`、FIFO 分账、每日复盘 `trader`、`(date, trader)` 唯一性、`review_count` 与 `schema_version` 3 的契约保持不变。正在运行的进程需重启后才采用新路由。
 >
 > 范围：交易记录、交易者标签统计、每日复盘、当前持仓和已实现收益。不包含每日选股、荐股或 AI 自动生成选股资源。不新增选股类资源。
 
-本文档约定 HTTP JSON 契约与计算口径。交易记录和持仓的已实现行为以当前 Node 为准；复盘 `trader` 以本文为准，不把旧的「按日期全局唯一」继续当作目标行为。生产边界未落地前，不得把本机直连 Node 当作可对外暴露的认证边界。
+本文档约定 HTTP JSON 契约与计算口径。交易记录和持仓的行为由 Node 实现；复盘 `trader` 以本文为准，不把旧的「按日期全局唯一」继续当作目标行为。Node 本身不提供认证，必须通过 FastAPI 的公共入口访问。
 
-持久化实现说明（契约口径，非 SQL）：本地 Node 将状态原子写入 JSON 文件 `backend/trade-journal-node/.data/journal.json`。磁盘形态为顶层 `schema_version`、`records`、`reviews`、`requests`。没有复盘表，也没有 `trader` 列；`trader` 是 `records[]` 与 `reviews[]` 元素上的字符串字段。FIFO 分账只作用于交易记录。迁移规则见 §8。
+持久化实现说明（契约口径，非 SQL）：本地 Node 将状态原子写入 JSON 文件 `backend/trade-journal-node/.data/journal.json`；Docker 默认路径为 `/app/data/trade-journal/journal.json`，由现有数据卷持久化。本地文件不会自动复制到 Docker。磁盘形态为顶层 `schema_version`、`records`、`reviews`、`requests`。没有复盘表，也没有 `trader` 列；`trader` 是 `records[]` 与 `reviews[]` 元素上的字符串字段。FIFO 分账只作用于交易记录。迁移规则见 §8。
 
 ## 1. 服务边界
 
 ### 1.1 路由与运行形态
 
 - 公共 HTTP 路径统一挂在同源 `/api` 下，例如 `/api/records`。浏览器只请求同源 `/api`，不得直接访问 Node 服务 origin。
-- Node 服务代码目录为 `backend/trade-journal-node/`。开发态监听 `http://127.0.0.1:3022`；该地址只作为本机开发代理目标，对浏览器客户端保持私有，不得作为前端 `baseURL` 或公开 API origin。
-- 开发态路由拆分（当前 `frontend/vite.config.ts` 已配置或须同步配置）：浏览器继续请求同源 `/api`；Vite 开发代理仅把本文列出的交易记录、交易者、每日复盘和持仓路径转发到 `127.0.0.1:3022` 的 Node 服务，具体包括 `/api/records`、`/api/records/*`、`/api/traders`、`/api/reviews`、`/api/reviews/*`、`/api/positions/current` 和 `/api/positions/history`；其余既有 `/api` 路径（以及 `/health` 等现有代理项）继续转发到 FastAPI，不经过 Node。
-- 本契约不要求、也不假设 FastAPI（`backend/app/`）增加转发路由。开发联调以 Vite 路径拆分为准；生产或 Docker 仍须在上游边界保持同一同源 `/api` 规则：本文路径落到 Node，其余仍由 FastAPI 处理，且不得让浏览器侧同时出现 Node 与 FastAPI 两个公开 API origin。该生产路由与认证边界尚未在本仓库落地。
+- Node 服务代码目录为 `backend/trade-journal-node/`，仅监听内部 `http://127.0.0.1:3022`，不得作为前端 `baseURL` 或公开 API origin。`dev.sh` 与 Docker 入口负责启动单个 Node 写入进程，不由 FastAPI reload/lifespan 启动。
+- 浏览器继续请求同源 `/api`；Vite 将全部 `/api` 与 `/health` 转到 FastAPI 3018。FastAPI 只将 `/api/records`、`/api/records/{id}`、`/api/reviews`、`/api/reviews/{id}`、`/api/traders`、`/api/positions/current`、`/api/positions/history` 的已定义方法转发给 Node；其他原有 API 仍由 FastAPI 处理。交易日志命名空间中的未知路径、尾斜杠和不支持的方法返回 JSON `404 NOT_FOUND`，不会落到前端 SPA。
+- 开发与 Docker 统一经公共 3018 访问。内部端口配置 `TRADE_JOURNAL_PORT`（默认 3022，范围 1..65535，禁止等于 FastAPI 端口）；上游固定 `127.0.0.1`，不接受客户端提供目标。`TRADE_JOURNAL_TIMEOUT_S` 默认 10 秒，可配置为大于 0 且不超过 30 秒。请求体上限 1 MiB，解压后响应体上限 8 MiB。转发不自动重试或跟随重定向；写入超时后应先核对结果，再决定是否重试。
 
 ### 1.2 认证边界与 trader 标签语义
 
 - 本契约不定义登录、会话或多用户隔离 API。v1 按本地单用户记录本设计，不接受客户端传入 `user_id`、`owner_id` 或类似身份字段。未来若增加多用户，需另行扩展认证与数据隔离契约。
 - `trader` 是账本/核算维度上的**交易者标签**（例如策略名或人名），用于分区 FIFO、过滤记录与持仓统计。它**不是**认证身份，不授予权限，也不构成多用户隔离；服务端不得根据 `trader` 做授权判定。
-- 开发态 Vite 把本文路径直连 Node 时，请求不经过 FastAPI，因此不能继承 FastAPI 现有的访问密码、会话或其他认证中间件。该直连代理只适用于本机开发，不得当作可对外暴露的认证边界。
-- 生产或任何对外暴露形态：必须在反向代理、网关或与 FastAPI 等价的认证边界之后再挂载本文路径；认证失败使用本文错误 envelope 返回 `401` 或 `403`。Node 的 `3022`（或等价内网地址）仍不得对浏览器公开。
+- 交易日志请求先经过 FastAPI 现有认证规则：未设访问密码时仅本机/内网放行；已设密码时要求有效会话。认证拒绝使用本文错误 envelope：`401 UNAUTHENTICATED`、`403 FORBIDDEN`。普通 FastAPI API 保持原有错误格式。
+- Bearer Token 沿用现有网络门禁与 scope，不新增交易日志 scope；不能用 Token 绕过会话规则。转发到 Node 前移除 Cookie 与 Authorization，Node 内部端口不对外发布。
 
 ## 2. 通用约定
 
@@ -145,6 +145,8 @@
 | `422` | `INVALID_DATE` | 日期存在但不满足本接口语义，例如 `from > to` |
 | `422` | `INVALID_STOCK_CODE` | 股票代码无法规范化为唯一 `symbol` |
 | `500` | `INTERNAL_ERROR` | 未预期服务端错误 |
+| `502` | `BAD_GATEWAY` | 内部 Node 不可连接、响应非 JSON / 无效 / 超限或返回重定向 |
+| `504` | `GATEWAY_TIMEOUT` | 内部 Node 请求超时；写请求可能已生效，应先核对结果 |
 
 行情不可用不作为持仓列表错误返回；应在价格字段中标记为 `price_status: "unavailable"`。
 
