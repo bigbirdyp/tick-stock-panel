@@ -16,6 +16,8 @@ from app.config import settings
 from app.services import api_gateway, api_tokens
 from app.services import auth as auth_service
 
+_REAL_CLIENT_IP = auth_api._client_ip
+
 
 @pytest.fixture
 def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
@@ -160,3 +162,51 @@ async def test_core_health_and_auth_contract_unchanged(app: FastAPI,
     # SSE 的票据认证仍由原端点返回 detail，不被日志响应映射覆盖。
     assert events.status_code == 401
     assert "detail" in events.json()
+
+
+@pytest.mark.parametrize("path", [
+    "/api/records", "/api/reviews", "/api/positions/current", "/api/traders",
+])
+@pytest.mark.parametrize(("peer", "forwarded"), [
+    ("127.0.0.1", "203.0.113.7"),
+    ("127.0.0.1", "unknown"),
+    ("127.0.0.1", "not-an-ip"),
+    # 非可信直连客户端即使伪造回环地址，也不能绕过认证。
+    ("203.0.113.7", "127.0.0.1"),
+])
+async def test_real_forwarded_client_rejected_before_node(
+    app: FastAPI, proxy: Callable, monkeypatch: pytest.MonkeyPatch,
+    path: str, peer: str, forwarded: str,
+) -> None:
+    monkeypatch.setattr(auth_api, "_client_ip", _REAL_CLIENT_IP)
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(peer, 43210)), base_url="http://test",
+    )
+    proxy(lambda request: pytest.fail("Untrusted forwarded peer reached Node"))
+    async with client:
+        response = await client.get(path, headers={"X-Forwarded-For": forwarded})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.parametrize(("forwarded", "configured"), [
+    ("192.168.10.11", False),
+    ("10.1.2.3", False),
+    ("203.0.113.7", True),
+])
+async def test_real_forwarded_lan_or_valid_public_session_allowed(
+    app: FastAPI, proxy: Callable, monkeypatch: pytest.MonkeyPatch,
+    forwarded: str, configured: bool,
+) -> None:
+    monkeypatch.setattr(auth_api, "_client_ip", _REAL_CLIENT_IP)
+    monkeypatch.setattr(auth_service, "is_configured", lambda: configured)
+    monkeypatch.setattr(auth_service, "is_valid_session", lambda token: token == "valid")
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 43210)), base_url="http://test",
+        cookies={auth_api.COOKIE_NAME: "valid"},
+    )
+    proxy(lambda request: httpx.Response(200, json={"data": []}))
+    async with client:
+        response = await client.get("/api/traders", headers={"X-Forwarded-For": forwarded})
+    assert response.status_code == 200
+    assert response.json() == {"data": []}
