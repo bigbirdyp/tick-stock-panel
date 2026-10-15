@@ -1,243 +1,166 @@
 import http from 'node:http'
 import type { AddressInfo, Server } from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { IncomingMessage } from 'node:http'
 import { createServer, type ProxyOptions, type UserConfig, type ViteDevServer } from 'vite'
-import { describe, expect, it } from 'vitest'
-import viteConfig, { isLoopbackPeerAddress, tradeJournalProxyBypass } from '../../../vite.config'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import viteConfig from '../../../vite.config'
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+const source = (viteConfig as UserConfig).server?.proxy ?? {}
+type ObservedRequest = { method: string, url: string, body: string, headers: http.IncomingHttpHeaders }
+type ObservedResponse = { status: number, body: string, headers: http.IncomingHttpHeaders }
 
-function peer(address: string | undefined, headers: IncomingMessage['headers'] = {}): IncomingMessage {
-  return { socket: { remoteAddress: address }, headers } as IncomingMessage
-}
+describe('Vite 的全部 API 统一经过 FastAPI', () => {
+  let backend: Server
+  let vite: ViteDevServer
+  let origin: string
+  const received: ObservedRequest[] = []
 
-describe('交易日记代理只认回环对端', () => {
-  it('放行 127/8、::1 和 IPv4-mapped ::ffff:127/8，其余包括缺地址一律拒绝', () => {
-    const allowed = [
-      '127.0.0.1',
-      '127.0.0.0',
-      '127.255.255.255',
-      '::1',
-      '::1%lo0',
-      '::ffff:127.0.0.1',
-      '::ffff:127.8.8.8',
-      '::ffff:7f00:1',
-      '0:0:0:0:0:ffff:127.0.0.1',
-    ]
-    for (const address of allowed) {
-      expect(isLoopbackPeerAddress(address), address).toBe(true)
-      expect(tradeJournalProxyBypass(peer(address)), address).toBeUndefined()
+  beforeAll(async () => {
+    backend = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      const observation = {
+        method: req.method ?? '', url: req.url ?? '',
+        body: Buffer.concat(chunks).toString('utf8'), headers: req.headers,
+      }
+      received.push(observation)
+      if (req.method === 'DELETE') {
+        res.writeHead(204)
+        res.end()
+      } else if (req.url?.startsWith('/api/events/stream')) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.end('event: update\ndata: {"ok":true}\n\n')
+      } else {
+        const status = Number(req.headers['x-test-status'] ?? (req.method === 'POST' ? 201 : 200))
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify(status >= 400
+          ? { error: { code: `TEST_${status}`, message: '后端返回错误' } }
+          : { backend: 'fastapi', ...observation }))
+      }
+    })
+    const backendPort = await listen(backend)
+    const proxy: Record<string, string | ProxyOptions> = {}
+    for (const [key, value] of Object.entries(source)) {
+      proxy[key] = typeof value === 'string'
+        ? `http://127.0.0.1:${backendPort}`
+        : { ...value, target: `http://127.0.0.1:${backendPort}` }
     }
+    vite = await createServer({
+      configFile: false, root: frontendRoot, logLevel: 'silent', appType: 'custom',
+      server: { host: '127.0.0.1', port: 0, hmr: false, watch: null, proxy },
+    })
+    await vite.listen()
+    const address = vite.httpServer?.address()
+    if (!address || typeof address === 'string') throw new Error('Vite did not bind an ephemeral TCP port')
+    origin = `http://127.0.0.1:${address.port}`
+  }, 20_000)
 
-    const denied = [
-      undefined,
-      '',
-      '10.1.2.3',
-      '192.168.1.20',
-      '8.8.8.8',
-      '0.0.0.0',
-      '::',
-      '::ffff:10.1.2.3',
-      '::ffff:8.8.8.8',
-      'localhost',
-    ]
-    for (const address of denied) {
-      expect(isLoopbackPeerAddress(address), String(address)).toBe(false)
-      expect(tradeJournalProxyBypass(peer(address)), String(address)).toBe(false)
-    }
-
-    expect(tradeJournalProxyBypass({ headers: { 'x-forwarded-for': '127.0.0.1', host: '127.0.0.1' } } as unknown as IncomingMessage)).toBe(false)
-    expect(tradeJournalProxyBypass(peer('192.168.1.20', {
-      host: '127.0.0.1:3011',
-      origin: 'http://127.0.0.1:3011',
-      'x-forwarded-for': '127.0.0.1',
-    }))).toBe(false)
-    expect(tradeJournalProxyBypass(peer('127.0.0.1', {
-      host: '10.0.0.8',
-      origin: 'http://10.0.0.8',
-      'x-forwarded-for': '8.8.8.8',
-    }))).toBeUndefined()
+  afterAll(async () => {
+    if (vite) await vite.close()
+    if (backend) await closeServer(backend)
   })
 
-  it('0.0.0.0 上的 Vite：非回环连接被拒绝，回环仍到 Node，其他 /api 仍到 FastAPI', async () => {
-    const source = (viteConfig as UserConfig).server?.proxy ?? {}
-    const tradeEntry = Object.entries(source).find(([key]) => key.startsWith('^'))
-    expect(tradeEntry, 'trade-journal proxy key').toBeDefined()
-    const tradeRoute = tradeEntry?.[1]
-    if (typeof tradeRoute !== 'object' || tradeRoute == null || tradeRoute.bypass !== tradeJournalProxyBypass) {
-      throw new Error('refusing to listen: trade-journal proxy has no loopback bypass')
-    }
-    const genericApi = source['/api']
-    expect(typeof genericApi === 'object' && genericApi != null && genericApi.bypass).toBeFalsy()
+  it('没有交易日记直连分支，/api 和 /health 都以 3018 为目标', () => {
+    expect(Object.keys(source).sort()).toEqual(['/api', '/health'])
+    const target = typeof source['/api'] === 'string' ? source['/api'] : source['/api'].target
+    expect(new URL(String(target)).port).toBe('3018')
+    expect(source['/health']).toBe(target)
+    expect(typeof source['/api'] === 'object' && source['/api'].bypass).toBeFalsy()
+  })
 
-    const trade = await startMarker('trade-node')
-    const api = await startMarker('fastapi')
-    let vite: ViteDevServer | undefined
-    try {
-      const proxy = retargetProxy(source, trade.origin, api.origin)
-      vite = await createServer({
-        configFile: false,
-        root: frontendRoot,
-        logLevel: 'silent',
-        appType: 'custom',
-        server: {
-          host: '0.0.0.0',
-          port: 0,
-          strictPort: false,
-          hmr: false,
-          watch: null,
-          proxy,
-        },
-      })
-      await vite.listen()
-      const bound = vite.httpServer?.address()
-      if (!bound || typeof bound === 'string') throw new Error('vite did not bind a tcp port')
-      const port = bound.port
+  it.each([
+    '/api/records', '/api/records/record-1', '/api/reviews', '/api/reviews/review-1',
+    '/api/positions/current', '/api/positions/history', '/api/traders',
+  ])('读接口 %s 到同一个后端并返回 JSON', async (pathname) => {
+    const response = await request(`${origin}${pathname}`)
+    expect(response.status).toBe(200)
+    expect(response.headers['content-type']).toContain('application/json')
+    expect(JSON.parse(response.body)).toMatchObject({ backend: 'fastapi', url: pathname, method: 'GET' })
+  })
 
-      const loopRecords = await request(`http://127.0.0.1:${port}/api/records?limit=1`)
-      const lan = await firstLanResponse(port, '/api/records')
-      const loopSettings = await request(`http://127.0.0.1:${port}/api/settings`)
-      const lanSettings = lan
-        ? await request(`http://${lan.host}:${port}/api/settings`)
-        : undefined
-      const spoofed = lan
-        ? await request(`http://${lan.host}:${port}/api/records`, {
-          host: `127.0.0.1:${port}`,
-          origin: `http://127.0.0.1:${port}`,
-          'x-forwarded-for': '127.0.0.1',
-        })
-        : undefined
+  it('保留重复、空值和中文查询参数的原始编码', async () => {
+    const pathname = '/api/records?trader=AI&trader=&name=%E4%BA%A4%E6%98%93%E4%BA%BA&empty&plus=a+b'
+    const response = await request(`${origin}${pathname}`)
+    expect(JSON.parse(response.body).url).toBe(pathname)
+  })
 
-      const observed = {
-        loopbackRecords: loopRecords.status,
-        lanRecords: lan?.response.status ?? null,
-        lanHost: lan?.host ?? null,
-        spoofedLanRecords: spoofed?.status ?? null,
-        loopbackSettings: loopSettings.status,
-        lanSettings: lanSettings?.status ?? null,
-        tradeHits: trade.hits,
-        apiHits: api.hits,
-      }
-      console.info(`trade-journal proxy statuses ${JSON.stringify(observed)}`)
+  it.each(['/api/records', '/api/reviews'])('POST %s 保留 UTF-8 请求和认证/幂等头、201 响应', async (pathname) => {
+    const body = JSON.stringify({ trader: '交易员甲', symbol: '600000.SH' })
+    const response = await request(`${origin}${pathname}`, {
+      method: 'POST', body,
+      headers: {
+        'content-type': 'application/json', cookie: 'session=test-session',
+        authorization: 'Bearer test-token', 'idempotency-key': 'test-request',
+      },
+    })
+    expect(response.status).toBe(201)
+    expect(JSON.parse(response.body)).toMatchObject({
+      backend: 'fastapi', method: 'POST', url: pathname, body,
+      headers: { cookie: 'session=test-session', authorization: 'Bearer test-token', 'idempotency-key': 'test-request' },
+    })
+  })
 
-      expect(loopRecords.status).toBe(200)
-      expect(loopRecords.body).toContain('trade-node')
-      expect(loopSettings.status).toBe(200)
-      expect(loopSettings.body).toContain('fastapi')
-      expect(loopSettings.body).not.toContain('trade-node')
+  it.each(['/api/records/record-1', '/api/reviews/review-1'])('PATCH 和 DELETE %s 保留方法、JSON 和 204 空体', async (pathname) => {
+    const body = JSON.stringify({ trader: '复盘交易员' })
+    const patched = await request(`${origin}${pathname}`, { method: 'PATCH', body, headers: { 'content-type': 'application/json' } })
+    expect(patched.status).toBe(200)
+    expect(JSON.parse(patched.body)).toMatchObject({ backend: 'fastapi', method: 'PATCH', body })
+    const deleted = await request(`${origin}${pathname}`, { method: 'DELETE' })
+    expect(deleted.status).toBe(204)
+    expect(deleted.body).toBe('')
+    expect(received.at(-1)).toMatchObject({ method: 'DELETE', url: pathname })
+  })
 
-      if (!lan || !lanSettings || !spoofed) {
-        throw new Error(`no non-loopback interface accepted a connection; synthetic socket cases still ran. candidates=${JSON.stringify(lanCandidates())}`)
-      }
-      expect(lan.response.status).toBe(404)
-      expect(lan.response.body).not.toContain('trade-node')
-      expect(spoofed.status).toBe(404)
-      expect(spoofed.body).not.toContain('trade-node')
-      expect(lanSettings.status).toBe(200)
-      expect(lanSettings.body).toContain('fastapi')
-      expect(trade.hits).toBe(1)
-      expect(api.hits).toBe(2)
-    } finally {
-      if (vite) await vite.close()
-      await trade.close()
-      await api.close()
-    }
-  }, 40_000)
+  it.each([400, 401, 403, 404, 409, 422, 428, 502, 504])('保留后端 %s 和错误 JSON', async (status) => {
+    const response = await request(`${origin}/api/reviews`, { headers: { 'x-test-status': String(status) } })
+    expect(response.status).toBe(status)
+    expect(response.headers['content-type']).toContain('application/json')
+    expect(JSON.parse(response.body)).toEqual({ error: { code: `TEST_${status}`, message: '后端返回错误' } })
+  })
+
+  it.each(['/api/settings', '/health'])('普通接口 %s 仍经过后端', async (pathname) => {
+    const response = await request(`${origin}${pathname}`)
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toMatchObject({ backend: 'fastapi', url: pathname })
+  })
+
+  it('保留 SSE 请求头、响应类型和事件内容', async () => {
+    const response = await request(`${origin}/api/events/stream`)
+    expect(response.status).toBe(200)
+    expect(response.headers['content-type']).toBe('text/event-stream')
+    expect(response.body).toBe('event: update\ndata: {"ok":true}\n\n')
+    expect(received.at(-1)?.headers).toMatchObject({
+      accept: 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive',
+    })
+  })
 })
 
-function lanCandidates(): string[] {
-  const found: string[] = []
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (entry.internal) continue
-      if (entry.family !== 'IPv4') continue
-      found.push(entry.address)
-    }
-  }
-  return found
-}
-
-function retargetProxy(
-  source: NonNullable<UserConfig['server']>['proxy'],
-  tradeOrigin: string,
-  apiOrigin: string,
-): Record<string, string | ProxyOptions> {
-  const next: Record<string, string | ProxyOptions> = {}
-  for (const [key, value] of Object.entries(source ?? {})) {
-    if (typeof value === 'string') {
-      next[key] = apiOrigin
-      continue
-    }
-    const target = String(value.target ?? '')
-    next[key] = {
-      ...value,
-      target: target === 'http://127.0.0.1:3022' ? tradeOrigin : apiOrigin,
-    }
-  }
-  return next
-}
-
-function startMarker(marker: string): Promise<{ origin: string, hits: number, close: () => Promise<void> }> {
-  const state = { hits: 0 }
-  const server = http.createServer((req, res) => {
-    state.hits += 1
-    res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end(`${marker} ${req.url ?? ''}`)
-  })
-  return listen(server, '127.0.0.1').then((port) => ({
-    origin: `http://127.0.0.1:${port}`,
-    get hits() {
-      return state.hits
-    },
-    close: () => closeServer(server),
-  }))
-}
-
-function listen(server: Server, host: string): Promise<number> {
+function listen(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, host, () => {
+    server.listen(0, '127.0.0.1', () => {
       const address = server.address() as AddressInfo | null
-      if (!address) {
-        reject(new Error('missing listen address'))
-        return
-      }
+      if (!address) return reject(new Error('Missing backend listen address'))
       resolve(address.port)
     })
   })
 }
 
 function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()))
-  })
+  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
 }
 
-function request(url: string, headers?: http.OutgoingHttpHeaders): Promise<{ status: number, body: string }> {
+function request(url: string, options: { method?: string, body?: string, headers?: http.OutgoingHttpHeaders } = {}): Promise<ObservedResponse> {
   return new Promise((resolve, reject) => {
-    const req = http.get(url, { headers }, (res) => {
+    const req = http.request(url, { method: options.method ?? 'GET', headers: options.headers }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
-      res.on('end', () => {
-        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
-      })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }))
     })
-    req.setTimeout(2000, () => req.destroy(new Error(`timeout ${url}`)))
+    req.setTimeout(2000, () => req.destroy(new Error(`Timeout ${url}`)))
     req.on('error', reject)
+    req.end(options.body)
   })
-}
-
-async function firstLanResponse(port: number, pathname: string): Promise<{ host: string, response: { status: number, body: string } } | undefined> {
-  for (const host of lanCandidates()) {
-    try {
-      const response = await request(`http://${host}:${port}${pathname}`)
-      return { host, response }
-    } catch {
-      continue
-    }
-  }
-  return undefined
 }
