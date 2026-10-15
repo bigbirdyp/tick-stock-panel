@@ -342,7 +342,7 @@ describe('同源 HTTP 客户端', () => {
   })
 })
 
-it('开发代理仅把交易日记契约路径发往 Node', () => {
+it('开发代理将交易日记和其他 API 统一发往 FastAPI 3018', () => {
   const proxy = (viteConfig as UserConfig).server?.proxy
   expect(proxy).toBeDefined()
   const targetFor = (url: string) => {
@@ -350,10 +350,9 @@ it('开发代理仅把交易日记契约路径发往 Node', () => {
     const route = match?.[1]
     return typeof route === 'string' ? route : route?.target
   }
-  for (const path of ['/api/records', '/api/records?limit=20', '/api/records/rec_1', '/api/traders', '/api/traders?x=1', '/api/reviews', '/api/reviews/rev_1', '/api/positions/current', '/api/positions/history?limit=20']) {
-    expect(targetFor(path), path).toBe('http://127.0.0.1:3022')
-  }
-  for (const path of ['/api/settings', '/api/positions/other', '/api/records-extra', '/api/reviews-extra', '/api/traders/extra']) {
-    expect(targetFor(path), path).not.toBe('http://127.0.0.1:3022')
+  const publicTarget = targetFor('/api/settings')
+  expect(new URL(String(publicTarget)).port).toBe('3018')
+  for (const path of ['/api/records', '/api/records?limit=20', '/api/records/rec_1', '/api/traders', '/api/traders?x=1', '/api/reviews', '/api/reviews/rev_1', '/api/positions/current', '/api/positions/history?limit=20', '/api/settings', '/api/positions/other', '/api/records-extra', '/api/reviews-extra', '/api/traders/extra', '/health']) {
+    expect(targetFor(path), path).toBe(publicTarget)
   }
 })
