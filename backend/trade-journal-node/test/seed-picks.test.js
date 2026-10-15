@@ -72,7 +72,7 @@ test('sample file is marked as sample data and builds file-import buys', () => {
   assert.equal(loaded.sample, true);
   assert.equal(loaded.picks.length, 3);
   const parsed = parseArgs(['--from-file', samplePath, '--dry-run']);
-  assert.equal(parsed.journal, 'http://127.0.0.1:3022');
+  assert.equal(parsed.journal, 'http://127.0.0.1:3018');
   assert.equal(parsed.tspBase, 'http://47.95.156.102:5000');
   assert.equal(parsed.trader, null);
   assert.equal(parseArgs(['--from-file', samplePath, '--trader', '  杨鹏  ']).trader, '杨鹏');

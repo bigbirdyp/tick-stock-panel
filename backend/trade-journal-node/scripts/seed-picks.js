@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { todayShanghai } from '../src/store.js';
 import { dateField, stockCode } from '../src/validation.js';
 
-const JOURNAL_ORIGIN = 'http://127.0.0.1:3022';
+const JOURNAL_ORIGIN = 'http://127.0.0.1:3018';
 const TSP_ORIGIN = 'http://47.95.156.102:5000';
 const SHARES = 100;
 const FILE_LABEL = '文件导入';

@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 
 export const dataFile = process.env.TRADE_JOURNAL_DATA_FILE || fileURLToPath(new URL('../.data/journal.json', import.meta.url));
 
-// Vite and docs/api.md pin the dev proxy at 127.0.0.1:3022. The ambient PORT
+// FastAPI forwards journal requests to this internal loopback port. Ambient PORT
 // belongs to other processes (FastAPI, the jaw server) and must not move this listener.
 export function journalPort(env = process.env) {
   const raw = env.TRADE_JOURNAL_PORT;
