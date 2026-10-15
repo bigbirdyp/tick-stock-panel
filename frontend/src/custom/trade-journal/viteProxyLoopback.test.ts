@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { EventEmitter } from 'node:events'
 import type { AddressInfo, Server } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -68,6 +69,32 @@ describe('Vite 的全部 API 统一经过 FastAPI', () => {
     expect(new URL(String(target)).port).toBe('3018')
     expect(source['/health']).toBe(target)
     expect(typeof source['/api'] === 'object' && source['/api'].bypass).toBeFalsy()
+  })
+
+  it.each([undefined, '203.0.113.7', '127.0.0.1, 203.0.113.7'])('真实代理覆盖客户端 XFF=%s', async (forwarded) => {
+    const response = await request(`${origin}/api/records`, {
+      headers: forwarded ? { 'x-forwarded-for': forwarded } : {},
+    })
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body).headers['x-forwarded-for']).toBe('127.0.0.1')
+  })
+
+  it.each([
+    ['203.0.113.7', '203.0.113.7'], ['192.168.1.20', '192.168.1.20'],
+    ['::ffff:203.0.113.7', '::ffff:203.0.113.7'], [undefined, 'unknown'], ['', 'unknown'],
+  ])('转发可信 socket 对端 %s，缺失地址不退回本机', (peer, expected) => {
+    const api = source['/api']
+    if (typeof api !== 'object' || !api.configure) throw new Error('API proxy has no configure handler')
+    const proxy = new EventEmitter()
+    api.configure(proxy as Parameters<NonNullable<ProxyOptions['configure']>>[0], api)
+    const headers: Record<string, string> = {}
+    proxy.emit('proxyReq', {
+      setHeader: (name: string, value: string) => { headers[name.toLowerCase()] = value },
+    }, {
+      url: '/api/records', socket: { remoteAddress: peer },
+      headers: { 'x-forwarded-for': '127.0.0.1', host: 'localhost', origin: 'http://localhost' },
+    })
+    expect(headers['x-forwarded-for']).toBe(expected)
   })
 
   it.each([

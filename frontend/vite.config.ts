@@ -24,6 +24,9 @@ export default defineConfig({
         // SSE 端点需要禁用缓冲
         configure: (proxy) => {
           proxy.on('proxyReq', (_proxyReq, req) => {
+            // FastAPI sees Vite's loopback connection. Preserve the real peer
+            // without trusting a client-supplied forwarding chain.
+            _proxyReq.setHeader('X-Forwarded-For', req.socket.remoteAddress || 'unknown')
             if (req.url?.includes('/stream')) {
               _proxyReq.setHeader('Accept', 'text/event-stream')
               _proxyReq.setHeader('Cache-Control', 'no-cache')
