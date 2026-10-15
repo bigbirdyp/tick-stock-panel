@@ -39,7 +39,12 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
-Docker 采用两阶段构建,前端 dist 拷进后端镜像,**单容器**运行,数据完全在自己手里。
+Docker 采用多阶段构建，前端 dist 拷进后端镜像，**单容器**运行。容器入口同时管理 FastAPI 和交易日记 Node 两个进程；任何一个退出都会清理另一个，TERM / INT 信号会转发给两个进程组。
+
+- 公共端口只有 **3018**：页面、原有 FastAPI API 与 `/api/records`、`/api/reviews`、`/api/positions/*`、`/api/traders` 均经同一入口和访问密码 / 会话认证。Compose 只发布 3018，Node 仅监听容器内部 `127.0.0.1:3022`。
+- 交易日记默认写入 `/app/data/trade-journal/journal.json`，随现有 `./data:/app/data` 数据卷持久化；镜像不包含开发态 `.data/journal.json`，也不会自动搬迁它。原有账本字段和 FIFO / 复盘契约不变。
+- `TRADE_JOURNAL_PORT` 仅配置内部 Node 端口，默认 3022，禁止等于 3018；手动覆盖时必须保证 FastAPI 与 Node 使用相同值。Compose 固定为 3022。`TRADE_JOURNAL_TIMEOUT_S` 默认 10 秒，范围 `(0, 30]`。
+- 入口使用构建时已安装的 Python 依赖，不在启动时重新同步。启用访问密码后，浏览器先登录；命令行访问交易日记需有效会话 Cookie。既有 Bearer Token scope 不新增交易日记权限。
 
 更新到新版本:
 
@@ -68,19 +73,24 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-`dev.sh` 自动检查 / 下载依赖、释放端口、同时起前后端,Ctrl-C 一并关闭。默认:
+`dev.sh` 自动检查 / 下载依赖、释放端口，同时启动 FastAPI、内部 Node 和前端，Ctrl-C 一并关闭：
 
-- 后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>
-- 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
+- 公共后端固定 <http://localhost:3018>（含交易日记）· 前端默认 <http://localhost:3011>。Node 仅内部 `127.0.0.1:3022`，不对外发布。
+- `PORT` / `.env` 不改变 `dev.sh` 后端端口；非 3018 的 `BACKEND_PORT` 会被拒绝。前端可用 `FRONTEND_PORT=5173 ./dev.sh` 调整，不能占用 3018 / 3022。
+- Vite 全部 `/api` 与 `/health` 统一转到 3018；本地账本仍是 `backend/trade-journal-node/.data/journal.json`。
 
 ### 手动分别启动(不想用 dev.sh)
 
 ```bash
+# 内部 Node（独立终端；不要同时运行 dev.sh）
+cd backend/trade-journal-node
+TRADE_JOURNAL_PORT=3022 npm start
+
 # 后端
 cd backend && uv sync --extra backtest   # 含回测依赖
 # 老 CPU: uv sync --extra legacy-cpu
 # 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
-uv run uvicorn app.main:app --reload --port 3018
+PORT=3018 TRADE_JOURNAL_PORT=3022 uv run --no-sync python -m uvicorn app.main:app --reload --port 3018
 
 # 前端
 cd frontend && pnpm install && pnpm dev   # http://localhost:3011

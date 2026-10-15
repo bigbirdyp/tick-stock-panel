@@ -482,7 +482,7 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-自动检查 / 下载依赖、释放端口，同时启动 FastAPI、交易日记 Node sidecar 和前端。FastAPI → <http://localhost:3018> · Node → <http://127.0.0.1:3022>（仅本机）· 前端 → <http://localhost:3011>。交易日记需要 Node.js 20 或更新版本。
+自动检查 / 下载依赖、释放端口，同时启动 FastAPI、交易日记 Node sidecar 和前端。公共后端（含交易日记）固定为 <http://localhost:3018>，前端为 <http://localhost:3011>。Node 仅监听内部 `127.0.0.1:3022`，浏览器和联调请求统一经 3018；交易日记需要 Node.js 20 或更新版本。`PORT` / `.env` 不改变 `dev.sh` 的后端端口，非 3018 的 `BACKEND_PORT` 会被拒绝。
 
 ### 方式 E:桌面客户端(Windows / macOS)
 
@@ -506,13 +506,13 @@ xattr -dr com.apple.quarantine /Applications/TSP.app
 
 ### 交易日记本地开发（Node sidecar）
 
-交易日记由 Node sidecar 提供：浏览器仍只请求同源 `/api`，**不要**把 Node 地址配成前端 `baseURL` 或公开 API origin。契约见 [docs/api.md](./docs/api.md)。下列命令只用于本机三服务联调与 Vite 路径代理；生产认证与同源路由边界仍须另行落地（**不声称**生产认证已实现）。
+交易日记仍由 Node sidecar 实现，FastAPI 在 **3018** 将 `/api/records`、`/api/reviews`、`/api/positions/*`、`/api/traders` 转发给内部 Node。浏览器只请求同源 `/api`；Vite 的全部 `/api` 与 `/health` 统一走 FastAPI 3018。契约见 [docs/api.md](./docs/api.md)。
 
-只起 Node 时，交易日记 API（`/api/records`、`/api/traders`、`/api/reviews`、`/api/positions/*`）可独立响应，`curl` 与契约联调不依赖 FastAPI。打开完整 React 壳（设置/布局/onboarding 等会打 `/api/settings`）时，必须另起 FastAPI；否则 Vite 页会停在「加载中」。
+交易日记请求先经过 FastAPI 现有访问密码 / 会话认证，再转到 Node；未设密码时沿用本机/内网访问规则。启用密码后，浏览器先登录，命令行请求需携带有效会话 Cookie。既有 Bearer Token 的 scope 不增加交易日记权限。`trader` 是账本标签，不是登录身份。
 
-完整本机联调直接运行 `./dev.sh`，它会一起启动三项服务，并把交易日记 Node 固定在 `127.0.0.1:3022`；通用 `PORT` 只影响 FastAPI，不改变 Node 端口。需要分别控制服务时，也可按下面的顺序在 **三个** 终端手动启动，此时不要再同时运行 `./dev.sh`，以免端口冲突。
+完整本机联调直接运行 `./dev.sh`，它会启动三项服务。公共后端固定 3018，Node 固定内部 3022，前端默认 3011（可用 `FRONTEND_PORT` 修改）。需要分别控制服务时，可按下面的顺序在 **三个** 终端手动启动，此时不要再同时运行 `./dev.sh`。
 
-仅在本机访问时可用 `HOST=127.0.0.1 ./dev.sh` 同时限制 FastAPI 和 Vite 的监听地址；默认启动脚本仍按 `HOST` / `.env` 配置监听地址。交易日记的 Vite 代理只接受本机回环连接，不能替代生产认证。
+仅在本机访问时可用 `HOST=127.0.0.1 ./dev.sh` 同时限制 FastAPI 和 Vite 的监听地址；默认启动脚本仍按 `HOST` / `.env` 配置监听地址。不要映射或公开 Node 3022。
 
 **1. Node sidecar（Node ≥ 20，强制 loopback `127.0.0.1:3022`）**
 
@@ -532,11 +532,11 @@ npm run seed # 写入上述数据文件
 
 **把 AI 选股结果写成今天的买入记录（`npm run seed-picks`，Node ≥ 20）**
 
-在已启动的交易日记 Node（默认 `http://127.0.0.1:3022`）上，用现有 `POST /api/records` 写入买入记录（`trader` / 幂等键约定见 [docs/api.md](./docs/api.md) §9）。每条记录：交易日为 Asia/Shanghai **今天**、数量 **100** 股、备注形如 `AI选股：<策略名或「文件导入」> + <理由>`。
+经公共后端（默认 `http://127.0.0.1:3018`），用现有 `POST /api/records` 写入买入记录（`trader` / 幂等键约定见 [docs/api.md](./docs/api.md) §9）。每条记录：交易日为 Asia/Shanghai **今天**、数量 **100** 股、备注形如 `AI选股：<策略名或「文件导入」> + <理由>`。导入器不会绕过认证；启用访问密码后，未携带会话的写入会被拒绝。
 
-`trader`（交易者标签，非登录身份）：未传 `--trader` 时，TSP 默认为 `AI选股:<策略展示名>`，文件默认为 `AI选股:文件导入`；可用 `--trader` 显式覆盖。最终标签先 trim，再校验为 **1..64** 个 UTF-16 字符；默认拼接或显式值超长时导入器**失败退出**，不截断。`client_request_id` 为确定性短键 `seed2:<日期>:<规范 symbol>:<trader 哈希>`（全局 ≤80）：同一天 / 标的 / 交易者且 payload 相同 → 重跑不新写；同一天 / 标的但不同交易者 → 各自独立记录；同键但价格、备注等不一致 → `409 DUPLICATE_RECORD`。旧记录缺合法 `trader` 时迁到 `未指定`。前端 **交易日记**（`/trade-journal`）用交易者 tab 筛 **交易记录**，持仓列表也可按交易者过滤；`GET /api/traders` 经 Vite `/api` 代理到 Node `127.0.0.1:3022`。不是单独的「选股」页。
+`trader`（交易者标签，非登录身份）：未传 `--trader` 时，TSP 默认为 `AI选股:<策略展示名>`，文件默认为 `AI选股:文件导入`；可用 `--trader` 显式覆盖。最终标签先 trim，再校验为 **1..64** 个 UTF-16 字符；默认拼接或显式值超长时导入器**失败退出**，不截断。`client_request_id` 为确定性短键 `seed2:<日期>:<规范 symbol>:<trader 哈希>`（全局 ≤80）：同一天 / 标的 / 交易者且 payload 相同 → 重跑不新写；同一天 / 标的但不同交易者 → 各自独立记录；同键但价格、备注等不一致 → `409 DUPLICATE_RECORD`。旧记录缺合法 `trader` 时迁到 `未指定`。前端 **交易日记**（`/trade-journal`）用交易者 tab 筛 **交易记录**，持仓列表也可按交易者过滤；`GET /api/traders` 经 Vite → FastAPI 3018 → 内部 Node。不是单独的「选股」页。
 
-只读访问 TSP 缓存，不触发选股重算或收费分析：允许的 TSP 请求仅为 `GET /api/strategies` 与 `GET /api/screener/cached-result/{strategy_id}`；脚本对日记侧只 `POST /api/records`。默认 TSP 基址 `http://47.95.156.102:5000`（可用 `--tsp-base` 覆盖），日记基址 `http://127.0.0.1:3022`（可用 `--journal` 覆盖）。凭证不要写进命令历史以外的仓库文件。
+只读访问 TSP 缓存，不触发选股重算或收费分析：允许的 TSP 请求仅为 `GET /api/strategies` 与 `GET /api/screener/cached-result/{strategy_id}`；脚本对日记侧只 `POST /api/records`。默认 TSP 基址 `http://47.95.156.102:5000`（可用 `--tsp-base` 覆盖），日记基址 `http://127.0.0.1:3018`（可用 `--journal` 覆盖）。凭证不要写进仓库文件。
 
 先在 `backend/trade-journal-node` 下用 `--dry-run` 预览，确认再去掉该开关真实写入：
 
@@ -561,7 +561,7 @@ npm run seed-picks -- --from-file scripts/picks.sample.json --trader '杨鹏' --
 ```bash
 cd backend
 uv sync --frozen
-uv run --no-sync python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3018
+PORT=3018 TRADE_JOURNAL_PORT=3022 uv run --no-sync python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 3018
 ```
 
 若根目录已有 `.env`，可加上 `--env-file ../.env`（与 `dev.sh` 读配置的方式一致）。完整壳需要它提供 `/api/settings` 等非交易日记接口。
@@ -573,7 +573,7 @@ cd frontend
 pnpm dev --host 127.0.0.1 --port 3011    # http://127.0.0.1:3011；本机联调请限制在回环地址
 ```
 
-`frontend/vite.config.ts` 仅把 `/api/records`、`/api/traders`、`/api/reviews`、`/api/positions/current`、`/api/positions/history`（含子路径）转到 `http://127.0.0.1:3022`；其余 `/api` 与 `/health` 仍走 FastAPI（默认 `127.0.0.1:3018`）。浏览器打开 <http://127.0.0.1:3011>。
+`frontend/vite.config.ts` 的全部 `/api` 与 `/health` 转到 FastAPI 3018，不再直连 Node。浏览器打开 <http://127.0.0.1:3011>；直接调用 <http://127.0.0.1:3018/api/traders> 也经过同一认证边界。
 
 默认走真实同源 API。仅当前后端未联通、要看页面示例数据时再显式开启 mock：
 
@@ -582,13 +582,13 @@ cd frontend
 VITE_TRADE_JOURNAL_SOURCE=mock pnpm dev --host 127.0.0.1 --port 3011
 ```
 
-> ⚠️ Vite 把交易日记路径直连 Node 时，**不会**经过 FastAPI 的访问密码 / 会话等认证中间件。该直连代理只适用于本机开发，**不得对外暴露**。
+Docker 同样只对外发布 3018；镜像入口管理 FastAPI 和内部 Node 两个进程，任一退出会关闭另一进程。交易日记默认持久化到 `/app/data/trade-journal/journal.json`（Compose 对应主机 `data/trade-journal/journal.json`）；本地开发仍使用原有 `.data/journal.json`，不会自动复制或迁移到 Docker 数据目录。
 
-**4. 本机 curl 示例（打 loopback sidecar；若本机启用了 HTTP 代理，对 `127.0.0.1` 加 `--noproxy '*'`）**
+**4. 本机 curl 示例（统一经 3018；启用密码后加 `-b <会话 Cookie 文件>`；本机 HTTP 代理可用 `--noproxy '*'` 绕过）**
 
 ```bash
 # 创建交易记录（trader 必填）
-curl --noproxy '*' -sS -X POST http://127.0.0.1:3022/api/records \
+curl --noproxy '*' -sS -X POST http://127.0.0.1:3018/api/records \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{
     "trader": "杨鹏",
@@ -606,20 +606,21 @@ curl --noproxy '*' -sS -X POST http://127.0.0.1:3022/api/records \
   }'
 
 # 交易者标签列表
-curl --noproxy '*' -sS 'http://127.0.0.1:3022/api/traders'
+curl --noproxy '*' -sS 'http://127.0.0.1:3018/api/traders'
 
 # 创建每日复盘
-curl --noproxy '*' -sS -X POST http://127.0.0.1:3022/api/reviews \
+curl --noproxy '*' -sS -X POST http://127.0.0.1:3018/api/reviews \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{
+    "trader": "杨鹏",
     "date": "2026-10-12",
     "content": "指数缩量震荡，高位题材分歧加大。明日重点观察成交量能否恢复。",
     "tags": ["缩量", "题材分歧", "等待确认"]
   }'
 
 # 当前持仓 / 历史已实现收益
-curl --noproxy '*' -sS 'http://127.0.0.1:3022/api/positions/current'
-curl --noproxy '*' -sS 'http://127.0.0.1:3022/api/positions/history'
+curl --noproxy '*' -sS 'http://127.0.0.1:3018/api/positions/current'
+curl --noproxy '*' -sS 'http://127.0.0.1:3018/api/positions/history'
 ```
 
 ### 跑起来后的第一次使用

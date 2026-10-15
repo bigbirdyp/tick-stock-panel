@@ -2,8 +2,7 @@
 # tickflow-stock-panel — 一键启动 FastAPI、交易日记 Node 和前端
 #
 # 用法:
-#   ./dev.sh                          # 默认 backend:3018  journal:3022  frontend:3011
-#   BACKEND_PORT=8000 ./dev.sh        # 改后端端口
+#   ./dev.sh                          # 公共 backend:3018  frontend:3011；Node 仅内部 127.0.0.1:3022
 #   FRONTEND_PORT=5173 ./dev.sh       # 改前端端口
 #
 # Ctrl-C 同时关闭三个服务。
@@ -38,10 +37,14 @@ read_dotenv_value() {
 }
 
 ENV_HOST="$(read_dotenv_value HOST)"
-ENV_PORT="$(read_dotenv_value PORT)"
 BACKEND_HOST="${HOST:-${ENV_HOST:-0.0.0.0}}"
-# Keep BACKEND_PORT as a backwards-compatible explicit override.
-BACKEND_PORT="${BACKEND_PORT:-${PORT:-${ENV_PORT:-3018}}}"
+# Development and production share one public API port. Ambient PORT (for
+# example cli-jaw's own port) and .env must not redirect the development API.
+if [[ -n "${BACKEND_PORT:-}" && "$BACKEND_PORT" != "3018" ]]; then
+  echo "[dev] 测试后端固定使用 3018；请移除非 3018 的 BACKEND_PORT" >&2
+  exit 1
+fi
+BACKEND_PORT=3018
 FRONTEND_PORT="${FRONTEND_PORT:-3011}"
 UVICORN_ENV_ARGS=()
 if [[ -f "$ROOT/.env" ]]; then
@@ -95,8 +98,8 @@ if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0
   err "交易日记需要 Node.js 20 或更新版本"
   exit 1
 fi
-if [[ "$BACKEND_PORT" == "3022" || "$FRONTEND_PORT" == "3022" ]]; then
-  err "端口 3022 留给交易日记，请为 FastAPI 和前端使用其他端口"
+if [[ "$FRONTEND_PORT" == "3022" || "$FRONTEND_PORT" == "3018" ]]; then
+  err "前端端口不能使用后端 3018 或内部交易日记 3022"
   exit 1
 fi
 
@@ -184,7 +187,7 @@ echo -e "${BLUE}╭────────────────────�
 echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                        ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  journal   ${YELLOW}http://127.0.0.1:3022${NC}        ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  journal   ${YELLOW}经 backend:3018（内部 3022）${NC}       ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭三个服务                      ${BLUE}│${NC}"
@@ -193,6 +196,7 @@ echo
 
 (
   cd "$BACKEND_DIR"
+  export PORT=3018 TRADE_JOURNAL_PORT=3022
   # --no-sync: 跳过依赖解析, 直接用已安装的 .venv。
   # 比 --frozen 更彻底: 不校验 lockfile, 避免镜像源 403/网络抖动导致后端起不来。
   # python -m uvicorn: 强制用 venv 的解释器和 uvicorn 模块, 防止 PATH 里
