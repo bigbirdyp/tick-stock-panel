@@ -11,6 +11,7 @@
 # ===== 用户运行时数据(绝不应进镜像) =====
 data
 backend/data
+backend/trade-journal-node/.data
 
 # ===== 前端构建产物 / 依赖(镜像内会重新 build, 带进来反而污染) =====
 frontend/node_modules
@@ -46,6 +47,9 @@ backend/build
 dev.sh
 dev.ps1
 scripts
+backend/trade-journal-node/test
+backend/trade-journal-node/scripts
+backend/trade-journal-node/seed
 
 # ===== 密钥(防止误打进公开镜像) =====
 .env
