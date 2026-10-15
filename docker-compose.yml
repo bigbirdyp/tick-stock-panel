@@ -1,5 +1,4 @@
-# Phase 0 单 service:FastAPI 启动后既跑 API 又托管前端 dist。
-# 见 ADR-17 / §8.1。
+# 单 service: FastAPI 公开 3018 并托管前端，交易日志 Node 仅监听容器 loopback。
 services:
   app:
     build:
@@ -21,6 +20,9 @@ services:
       # 导致每次 up --build 重建容器都丢数据。environment 优先级高于 env_file,
       # 无论 .env 怎么写这里都以容器路径为准。
       - DATA_DIR=/app/data
+      - PORT=3018
+      - TRADE_JOURNAL_PORT=3022
+      - TRADE_JOURNAL_DATA_FILE=/app/data/trade-journal/journal.json
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
     volumes:

@@ -1,4 +1,4 @@
-# 两阶段构建:前端 dist 拷进后端镜像,单容器运行
+# 多阶段构建:前端静态产物 + FastAPI/内部交易日志 Node, 单容器仅公开 3018
 # 可选:构建网络无法直连官方源时,传入 --build-arg USE_CN_MIRROR=1 启用国内镜像
 ARG USE_CN_MIRROR=1
 ARG NPM_REGISTRY=https://registry.npmmirror.com
@@ -40,7 +40,11 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry "$NPM_REGISTRY";
     && chmod +x /opt/codex-native \
     && /opt/codex-native --version
 
-# === Stage 2: Python 运行时 ===
+# === Stage 1j: 交易日志 Node 运行时 ===
+# 使用 Debian/glibc 二进制；Alpine/musl 的 Node 不能直接复制到 Python slim。
+FROM node:24-bookworm-slim AS journal-runtime
+
+# === Stage 2: Python + Node 运行时 ===
 FROM python:3.11-slim AS runtime
 ARG USE_CN_MIRROR=1
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -57,9 +61,13 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
         sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true; \
     fi \
     && apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng libstdc++6 libatomic1 \
     && rm -rf /var/lib/apt/lists/* \
     && tesseract --version
+
+# 交易日志没有 npm 依赖；运行镜像只需要 Node 可执行文件。
+COPY --from=journal-runtime /usr/local/bin/node /usr/local/bin/node
+RUN node --version
 
 # 安装 uv(快) —— 国内镜像下三重兜底:主源 → 备用源 → 官方源,
 # 任一成功即可,避免单一镜像同步延迟/故障导致构建失败。
@@ -92,11 +100,18 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
 # (<root>/backend/app/) 推导的, 容器内会错算到 /。这里用环境变量显式指定
 # 三个关键路径, 确保 static / tiers / data 都指向容器内正确位置。
 COPY backend/app ./app
+COPY backend/trade-journal-node/package.json /app/trade-journal-node/package.json
+COPY backend/trade-journal-node/src /app/trade-journal-node/src
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN node --check /app/trade-journal-node/src/index.js
 COPY tiers.yaml /app/tiers.yaml
 ENV STATIC_DIR=/app/static \
     TIERS_YAML=/app/tiers.yaml \
     DATA_DIR=/app/data \
-    TICKFLOW_ENV_FILE=/app/.env
+    TICKFLOW_ENV_FILE=/app/.env \
+    PORT=3018 \
+    TRADE_JOURNAL_PORT=3022 \
+    TRADE_JOURNAL_DATA_FILE=/app/data/trade-journal/journal.json
 
 # Frontend 静态产物
 COPY --from=frontend-builder /build/dist ./static
@@ -114,9 +129,7 @@ COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
 RUN codex --version
 
 ENV PYTHONPATH=/app
-# 运行时 uv 镜像源持久化: CMD 用 `uv run` 启动, 锁与 pyproject 不一致等场景下
-# uv 会在容器内重新解析/安装 —— 无源配置时默认 pypi.org, 国内网络会卡死启动
-# (实测阿里云 ECS)。与构建期 RUN 内的 export 同源, 这里让它跨层存活。
+# 保留与构建期一致的 uv 源配置；入口使用 --no-sync，启动时不改依赖或锁文件。
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
 ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
@@ -125,4 +138,4 @@ ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
 # 此处让日志时间戳等其余 naive 时间也对齐北京时间。
 ENV TZ=Asia/Shanghai
 EXPOSE 3018
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3018"]
+CMD ["/bin/sh", "/app/docker-entrypoint.sh"]
