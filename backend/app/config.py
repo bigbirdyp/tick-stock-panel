@@ -121,6 +121,9 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 3018
+    # 交易日志仅连接本机内部 Node 服务，不能配置任意上游地址。
+    trade_journal_port: int = Field(default=3022, ge=1, le=65535)
+    trade_journal_timeout_s: float = Field(default=10.0, gt=0, le=30)
     log_level: str = "INFO"
     backtest_range_guard: bool = False
     backtest_matrix_disk_cache_enabled: bool = True
@@ -168,6 +171,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
         """确保 data_dir 是绝对路径（环境变量传入的相对路径基于项目根目录解析）。"""
+        if self.trade_journal_port == self.port:
+            raise ValueError("trade_journal_port must differ from the FastAPI port")
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
