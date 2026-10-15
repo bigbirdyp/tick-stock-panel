@@ -41,6 +41,7 @@ from app.api import (
     stock_analysis,
     strategy,
     task_registry,
+    trade_journal,
     watchlist,
 )
 from app.api import auth as auth_api
@@ -542,6 +543,20 @@ _AUTH_WHITELIST_EXACT = (
 )
 
 
+def _auth_rejection(
+    request: Request, status: int, content: dict, headers: dict | None = None,
+) -> JSONResponse:
+    """日志客户端使用 error 契约；其他 API 保留既有认证响应。"""
+    if status in {401, 403} and trade_journal.is_trade_journal_path(request.url.path):
+        response = trade_journal.journal_error(
+            status, "UNAUTHENTICATED" if status == 401 else "FORBIDDEN", content["detail"],
+        )
+        if headers:
+            response.headers.update(headers)
+        return response
+    return JSONResponse(status_code=status, content=content, headers=headers)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
@@ -563,16 +578,15 @@ async def auth_middleware(request: Request, call_next):
         # 先于 evaluate 拦截 → 不消耗限流额度, 公网探测者也拿不到 Token 有效性信号
         gate = api_gateway.token_network_verdict(auth_api._client_ip(request))
         if gate is not None:
-            return JSONResponse(
-                status_code=gate["status"], content={"detail": gate["detail"]},
+            return _auth_rejection(
+                request, gate["status"], {"detail": gate["detail"]},
             )
         verdict = api_gateway.evaluate(
             settings.data_dir, request.method, path, authz[len("Bearer "):].strip(),
         )
         if verdict["status"] is not None:
-            return JSONResponse(
-                status_code=verdict["status"], content={"detail": verdict["detail"]},
-                headers=verdict["headers"],
+            return _auth_rejection(
+                request, verdict["status"], {"detail": verdict["detail"]}, verdict["headers"],
             )
         response = await call_next(request)
         for k, v in verdict["headers"].items():
@@ -586,9 +600,8 @@ async def auth_middleware(request: Request, call_next):
         if auth_api._is_local_network(auth_api._client_ip(request)):
             return await call_next(request)
         # 公网 → 拒绝。不裸奔, 也不给公网设密码的机会(防抢占)
-        return JSONResponse(
-            status_code=403,
-            content={
+        return _auth_rejection(
+            request, 403, {
                 "detail": "面板尚未初始化访问密码,请通过 SSH/本机浏览器访问以设置密码",
                 "code": "NOT_INITIALIZED",
             },
@@ -599,12 +612,13 @@ async def auth_middleware(request: Request, call_next):
     if token and auth_service.is_valid_session(token):
         return await call_next(request)
     # 未登录: 401(前端跳登录页)
-    return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
+    return _auth_rejection(request, 401, {"detail": "未登录或会话已过期"})
 
 
 # 路由
 app.include_router(core_router)
 app.include_router(auth_api.router)
+app.include_router(trade_journal.router)
 app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
