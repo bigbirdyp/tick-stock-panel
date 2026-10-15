@@ -6,13 +6,14 @@ import selectors
 import signal
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
 ENTRYPOINT = Path(__file__).resolve().parents[2] / "docker-entrypoint.sh"
 MOCK_CHILD = """
-import json, os, signal, sys
+import json, os, signal, subprocess, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 def stop(signum, frame):
@@ -26,9 +27,27 @@ signal.signal(signal.SIGUSR1, fail)
 if os.environ.get('MOCK_IGNORE_SIGNALS'):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+grandchild_pid = None
+if os.environ.get('MOCK_GRANDCHILD'):
+    read_fd, write_fd = os.pipe()
+    code = (
+        "import os,signal,sys; "
+        "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+        "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+        "os.write(int(sys.argv[1]),b'1'); os.close(int(sys.argv[1])); "
+        "exec('while True: signal.pause()')"
+    )
+    grandchild = subprocess.Popen(
+        [sys.executable, '-c', code, str(write_fd)], pass_fds=(write_fd,),
+    )
+    os.close(write_fd)
+    assert os.read(read_fd, 1) == b'1'
+    os.close(read_fd)
+    grandchild_pid = grandchild.pid
 print(json.dumps({'event': 'ready', 'name': name, 'pid': os.getpid(), 'args': sys.argv[1:],
     'port': os.environ['PORT'], 'journal_port': os.environ['TRADE_JOURNAL_PORT'],
-    'data_file': os.environ['TRADE_JOURNAL_DATA_FILE']}), flush=True)
+    'data_file': os.environ['TRADE_JOURNAL_DATA_FILE'], 'grandchild_pid': grandchild_pid}),
+    flush=True)
 while True:
     signal.pause()
 """
@@ -158,6 +177,37 @@ def test_unresponsive_children_are_killed_within_shutdown_deadline(supervisor) -
     assert process.returncode == 128 + signal.SIGTERM
     for child in children.values():
         assert_dead(child["pid"])
+
+
+@pytest.mark.parametrize("trigger", ["signal", "child_failure"])
+def test_descendants_ignoring_term_do_not_survive_process_group_cleanup(
+    supervisor, trigger: str,
+) -> None:
+    process = supervisor(MOCK_GRANDCHILD="1")
+    children = ready_children(process)
+    try:
+        for child in children.values():
+            # A real descendant in the service group, not a second direct child.
+            assert os.getpgid(child["grandchild_pid"]) == child["pid"]
+        if trigger == "signal":
+            process.terminate()
+        else:
+            os.kill(children["uv"]["pid"], signal.SIGUSR1)
+        # Grandchildren inherit this stdout/stderr. communicate cannot reach EOF
+        # while they survive, even when both direct children have already exited.
+        _output, error = process.communicate(timeout=8)
+        assert process.returncode == (143 if trigger == "signal" else 1), error
+        for child in children.values():
+            assert_dead(child["pid"])
+            assert_dead(child["grandchild_pid"])
+            with pytest.raises(ProcessLookupError):
+                os.killpg(child["pid"], 0)
+    finally:
+        # Keep the harness safe even when a regression leaves a mock family alive.
+        # These groups are the recorded PIDs of this test's own session leaders.
+        for child in children.values():
+            with suppress(ProcessLookupError):
+                os.killpg(child["pid"], signal.SIGKILL)
 
 
 def test_spawn_failure_stops_existing_child(supervisor, tmp_path: Path) -> None:
