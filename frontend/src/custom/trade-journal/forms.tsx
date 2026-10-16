@@ -12,6 +12,12 @@ function traderInvalid(error: unknown): boolean {
   return isTradeJournalError(error) && error.fields.some(field => field.path === 'trader')
 }
 
+function createRequestId(): string {
+  // getRandomValues 在 HTTP 部署中也可用；128 位随机键满足请求去重契约。
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function ErrorMessage({ error }: { error: unknown }) {
   if (!error) return null
   const known = isTradeJournalError(error)
@@ -51,14 +57,14 @@ export function RecordForm({ record, defaultTrader = '', onClose, onSave }: Reco
   const [fee, setFee] = useState(record ? String(record.fee) : '0')
   const [tax, setTax] = useState(record ? String(record.tax) : '0')
   const [note, setNote] = useState(record?.note ?? '')
-  const [requestId, setRequestId] = useState(() => crypto.randomUUID())
+  const [requestId, setRequestId] = useState(createRequestId)
   const [error, setError] = useState<unknown>(null)
   const [pending, setPending] = useState(false)
 
   // 编辑草稿后换一个幂等键；网络失败而未改草稿时保留原键，安全重试。
   const changed = <T,>(setter: (value: T) => void, value: T) => {
     setter(value)
-    if (!record) setRequestId(crypto.randomUUID())
+    if (!record) setRequestId(createRequestId())
     setError(null)
   }
 
