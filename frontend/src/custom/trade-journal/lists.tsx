@@ -2,7 +2,8 @@ import type { ReactNode } from 'react'
 import { Pencil, Trash2 } from 'lucide-react'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { isTradeJournalError } from './errors'
-import { resolveSymbol } from './symbol'
+import { openableSymbol } from './symbol'
+import { segmentReviewContent, type StockNameRef } from './reviewStocks'
 import type { DailyReview, HistoryRow, Pagination, Position, TradeRecord } from './types'
 import { LEGACY_TRADER_LABEL } from './types'
 
@@ -57,26 +58,17 @@ const stockButtonClass = 'cursor-pointer rounded-sm underline-offset-2 hover:und
 
 type StockRow = { code: string; symbol: string; name: string }
 
-// 只接受 resolveSymbol(code) 的结果。已有 symbol 必须与它一致，或本身就是同一六位代码。
-// 对不上、或代码无法识别交易所时返回 null，调用方保持纯文本，不猜后缀。
-function openableSymbol(row: StockRow): string | null {
-  const code = row.code.trim()
-  const resolved = resolveSymbol(code)
-  if (resolved == null) return null
-  const existing = row.symbol.trim()
-  if (existing === '' || existing === resolved || resolveSymbol(existing) === resolved) return resolved
-  return null
-}
-
 function StockIdentity({ row, onPreview }: { row: StockRow; onPreview?: (symbol: string, name: string) => void }) {
-  const symbol = openableSymbol(row)
+  const symbol = openableSymbol(row.code, row.symbol)
   if (symbol == null || onPreview == null) {
     return <><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></>
   }
   const open = () => onPreview(symbol, row.name)
+  // 打开用的就是规范 symbol。代码按钮的文字和 aria-label 必须显示它，
+  // 六位或空白的 row.symbol 不能再原样留在界面上。
   return <>
     <button type="button" className={`font-medium text-foreground ${stockButtonClass}`} aria-label={`查看 ${row.name} 详情`} onClick={open}>{row.name}</button>
-    <button type="button" className={`ml-2 font-mono text-muted ${stockButtonClass}`} aria-label={`查看 ${row.symbol || symbol} 详情`} onClick={open}>{row.symbol || symbol}</button>
+    <button type="button" className={`ml-2 font-mono text-muted ${stockButtonClass}`} aria-label={`查看 ${symbol} 详情`} onClick={open}>{symbol}</button>
   </>
 }
 
@@ -156,7 +148,28 @@ export function RecordTable({ rows, onEdit, onDelete, onPreview }: { rows: Trade
   )
 }
 
-export function ReviewListView({ rows, onEdit, onDelete }: { rows: DailyReview[]; onEdit: (review: DailyReview) => void; onDelete: (review: DailyReview) => void }) {
+function ReviewStockText({ content, stockNames, onPreview }: { content: string; stockNames?: ReadonlyMap<string, StockNameRef | null>; onPreview: (symbol: string, name: string) => void }) {
+  const segments = segmentReviewContent(content, stockNames)
+  return <>
+    {segments.map((segment, index) => {
+      if (segment.kind === 'text') return <span key={index}>{segment.text}</span>
+      const label = segment.via === 'name' ? `查看 ${segment.name} 详情` : `查看 ${segment.symbol} 详情`
+      return (
+        <button key={index} type="button" className={stockButtonClass} aria-label={label} onClick={() => onPreview(segment.symbol, segment.name)}>
+          {segment.text}
+        </button>
+      )
+    })}
+  </>
+}
+
+export function ReviewListView({ rows, onEdit, onDelete, onPreview, stockNames }: {
+  rows: DailyReview[]
+  onEdit: (review: DailyReview) => void
+  onDelete: (review: DailyReview) => void
+  onPreview?: (symbol: string, name: string) => void
+  stockNames?: ReadonlyMap<string, StockNameRef | null>
+}) {
   return <div className="divide-y divide-border/70">{rows.map(row => (
     <article key={row.id} className="p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -169,7 +182,9 @@ export function ReviewListView({ rows, onEdit, onDelete }: { rows: DailyReview[]
           <button type="button" aria-label={`删除 ${row.trader} ${row.date} 复盘`} onClick={() => onDelete(row)} className="rounded-btn p-1.5 text-danger hover:bg-danger/10"><Trash2 className="h-3.5 w-3.5" /></button>
         </div>
       </div>
-      <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-secondary">{row.content}</p>
+      <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-secondary">
+        {onPreview ? <ReviewStockText content={row.content} stockNames={stockNames} onPreview={onPreview} /> : row.content}
+      </p>
       {row.tags.length > 0 && <div className="mt-3 flex flex-wrap gap-1">{row.tags.map((tag, index) => <span key={`${tag}-${index}`} className="rounded bg-elevated px-2 py-0.5 text-[11px] text-muted">{tag}</span>)}</div>}
     </article>
   ))}</div>

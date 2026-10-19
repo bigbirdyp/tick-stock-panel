@@ -13,3 +13,13 @@ export function resolveSymbol(code: string): string | null {
   if (code.startsWith('920')) return `${code}.BJ`
   return null
 }
+
+// 只接受 resolveSymbol(code) 的结果。已有 symbol 必须与它一致，或本身就是同一六位代码。
+// 对不上、或代码无法识别交易所时返回 null，调用方保持纯文本，不猜后缀。
+export function openableSymbol(code: string, symbol: string): string | null {
+  const resolved = resolveSymbol(code.trim())
+  if (resolved == null) return null
+  const existing = symbol.trim()
+  if (existing === '' || existing === resolved || resolveSymbol(existing) === resolved) return resolved
+  return null
+}

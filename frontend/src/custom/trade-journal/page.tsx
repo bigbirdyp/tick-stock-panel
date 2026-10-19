@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -11,6 +11,7 @@ import { journal } from './client'
 import { isTradeJournalError } from './errors'
 import { RecordForm, ReviewForm } from './forms'
 import { HistoryTable, Pager, PositionTable, RecordTable, ResultState, ReviewListView } from './lists'
+import { stockNamesFromPayloads } from './reviewStocks'
 import { TraderTabs } from './traderTabs'
 import type {
   DailyReview,
@@ -87,6 +88,15 @@ function initialJournalView(): { tab: Tab; trader?: string } {
   const tab: Tab = isJournalTab(tabParam) ? tabParam : 'positions'
   const trader = params.get('trader')?.trim()
   return trader ? { tab, trader } : { tab }
+}
+
+// 名称只认本页已经拿到的持仓、历史、成交，以及查询缓存里已有的 instrument-search / instrument-names。
+// 不新发目录请求。直接打开复盘时这些都还没有，纯中文名称保持原文；规范 symbol 和六位代码不依赖名称索引。
+function reviewNamePayloads(client: QueryClient, loaded: readonly unknown[]): unknown[] {
+  const catalog = client.getQueriesData({
+    predicate: query => query.queryKey[0] === 'instrument-search' || query.queryKey[0] === 'instrument-names',
+  }).map(([, data]) => data)
+  return [...loaded, ...catalog]
 }
 
 function withTrader<T extends { trader?: string; offset?: number }>(query: T, trader: string | undefined): T {
@@ -297,6 +307,7 @@ export function TradeJournalPage() {
   }
 
   const currentQuery = tab === 'positions' ? positions : tab === 'history' ? history : tab === 'records' ? records : reviews
+  const reviewStockNames = stockNamesFromPayloads(reviewNamePayloads(qc, [positions.data, history.data, records.data]))
 
   return (
     <div className="flex h-full flex-col bg-base">
@@ -372,7 +383,7 @@ export function TradeJournalPage() {
             </>}
             {tab === 'reviews' && <>
               <ResultState loading={reviews.isPending} error={reviews.error} empty={reviews.data?.data.reviews.length === 0} onRetry={() => void reviews.refetch()} />
-              {reviews.data?.data.reviews.length ? <ReviewListView rows={reviews.data.data.reviews} onEdit={setReviewEditor} onDelete={item => askDelete({ kind: 'review', item })} /> : null}
+              {reviews.data?.data.reviews.length ? <ReviewListView rows={reviews.data.data.reviews} onEdit={setReviewEditor} onDelete={item => askDelete({ kind: 'review', item })} onPreview={(symbol, name) => setStockPreview({ symbol, name })} stockNames={reviewStockNames} /> : null}
               <Pager pagination={reviews.data?.data.pagination} onPage={offset => setReviewQuery(query => ({ ...query, offset }))} />
             </>}
           </section>
