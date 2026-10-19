@@ -13,6 +13,7 @@ import { isTradeJournalError } from './errors'
 import { RecordForm, ReviewForm } from './forms'
 import { HistoryTable, Pager, PositionTable, RecordTable, ResultState, ReviewListView } from './lists'
 import { aliasesFromPayload, indexStockNames, type StockAlias } from './reviewStocks'
+import { loadStockMarkerSet, parseStockMarkerQuery, stockMarkerQueryString } from './stockMarkers'
 import { TraderTabs } from './traderTabs'
 import type {
   DailyReview,
@@ -152,6 +153,37 @@ export function TradeJournalPage() {
     queryFn: () => journal.listReviews(reviewQuery),
     enabled: tab === 'reviews',
   })
+  // 预览打开且选定具体交易员时，才读该股全部逐笔。关闭或「全部」不请求。
+  // 失败只提示，不把标记传成空数组，避免看起来像这只股票没有成交。
+  const markerCode = stockPreview?.symbol.slice(0, 6) ?? ''
+  const markerTrader = recordQuery.trader
+  const markersEnabled = stockPreview != null && markerTrader != null && markerTrader.trim() !== '' && /^[0-9]{6}$/.test(markerCode)
+  const stockMarkerLoad = useQuery({
+    queryKey: QK.tradeJournalRecords(stockMarkerQueryString(markerCode, markerTrader ?? '')),
+    queryFn: ({ queryKey }) => {
+      const spec = parseStockMarkerQuery(queryKey[2])
+      return loadStockMarkerSet(journal.listRecords, spec.code, spec.trader)
+    },
+    enabled: markersEnabled,
+    retry: false,
+  })
+  const markerFailureToast = useRef('')
+  useEffect(() => {
+    if (!markersEnabled) return
+    if (!stockMarkerLoad.isError) {
+      markerFailureToast.current = ''
+      return
+    }
+    const key = `${markerCode}|${markerTrader ?? ''}`
+    if (markerFailureToast.current === key) return
+    markerFailureToast.current = key
+    toast('成交标记加载失败')
+  }, [markersEnabled, stockMarkerLoad.isError, markerCode, markerTrader])
+  const previewMarkers = markersEnabled
+    && stockMarkerLoad.data?.code === markerCode
+    && stockMarkerLoad.data?.trader === markerTrader
+    ? stockMarkerLoad.data.markers
+    : undefined
   // 与维度成分共用 QK.marketSnapshot，整表只请求一次。60 秒内命中缓存不再拉取。
   // 目录失败时 data 为空，名称保持原文；规范 symbol 和六位代码不依赖这份索引。
   const marketSnapshot = useQuery({
@@ -406,7 +438,7 @@ export function TradeJournalPage() {
         </div>
       </div>
 
-      <StockPreviewDialog symbol={stockPreview?.symbol ?? null} name={stockPreview?.name} onClose={() => setStockPreview(null)} />
+      <StockPreviewDialog symbol={stockPreview?.symbol ?? null} name={stockPreview?.name} markers={previewMarkers} onClose={() => setStockPreview(null)} />
       {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={recordEditor === 'new' ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
       {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} defaultTrader={reviewEditor === 'new' ? reviewQuery.trader ?? '' : ''} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
       {deletion && <Modal onClose={() => !deleting && setDeletion(null)} ariaLabel="确认删除" panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface p-5 shadow-xl" closeOnBackdrop={!deleting}>
