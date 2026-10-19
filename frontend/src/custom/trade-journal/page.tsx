@@ -1,17 +1,18 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { toast } from '@/components/Toast'
+import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { shanghaiToday } from './calendar'
 import { journal } from './client'
 import { isTradeJournalError } from './errors'
 import { RecordForm, ReviewForm } from './forms'
 import { HistoryTable, Pager, PositionTable, RecordTable, ResultState, ReviewListView } from './lists'
-import { stockNamesFromPayloads } from './reviewStocks'
+import { aliasesFromPayload, indexStockNames, type StockAlias } from './reviewStocks'
 import { TraderTabs } from './traderTabs'
 import type {
   DailyReview,
@@ -90,13 +91,17 @@ function initialJournalView(): { tab: Tab; trader?: string } {
   return trader ? { tab, trader } : { tab }
 }
 
-// 名称只认本页已经拿到的持仓、历史、成交，以及查询缓存里已有的 instrument-search / instrument-names。
-// 不新发目录请求。直接打开复盘时这些都还没有，纯中文名称保持原文；规范 symbol 和六位代码不依赖名称索引。
-function reviewNamePayloads(client: QueryClient, loaded: readonly unknown[]): unknown[] {
-  const catalog = client.getQueriesData({
-    predicate: query => query.queryKey[0] === 'instrument-search' || query.queryKey[0] === 'instrument-names',
-  }).map(([, data]) => data)
-  return [...loaded, ...catalog]
+// 行情快照的 symbol 可能带交易所后缀。代码只取前六位，能不能点仍由 openableSymbol 决定。
+// 没有名称的行不进索引。非 A 股、重名在 indexStockNames 里丢掉，正文保持原样。
+function snapshotAliases(rows: readonly { symbol?: string | null; name?: string | null }[] | undefined): StockAlias[] {
+  const aliases: StockAlias[] = []
+  for (const row of rows ?? []) {
+    const symbol = typeof row.symbol === 'string' ? row.symbol.trim() : ''
+    const name = typeof row.name === 'string' ? row.name.trim() : ''
+    if (symbol === '' || name === '') continue
+    aliases.push({ code: symbol.slice(0, 6), symbol, name })
+  }
+  return aliases
 }
 
 function withTrader<T extends { trader?: string; offset?: number }>(query: T, trader: string | undefined): T {
@@ -146,6 +151,14 @@ export function TradeJournalPage() {
     queryKey: QK.tradeJournalReviews(JSON.stringify(reviewQuery)),
     queryFn: () => journal.listReviews(reviewQuery),
     enabled: tab === 'reviews',
+  })
+  // 与维度成分共用 QK.marketSnapshot，整表只请求一次。60 秒内命中缓存不再拉取。
+  // 目录失败时 data 为空，名称保持原文；规范 symbol 和六位代码不依赖这份索引。
+  const marketSnapshot = useQuery({
+    queryKey: QK.marketSnapshot,
+    queryFn: api.marketSnapshot,
+    enabled: tab === 'reviews',
+    staleTime: 60_000,
   })
 
   const sectionCodeRef = useRef({ positions: '', history: '', records: '' })
@@ -307,7 +320,10 @@ export function TradeJournalPage() {
   }
 
   const currentQuery = tab === 'positions' ? positions : tab === 'history' ? history : tab === 'records' ? records : reviews
-  const reviewStockNames = stockNamesFromPayloads(reviewNamePayloads(qc, [positions.data, history.data, records.data]))
+  const reviewStockNames = useMemo(() => {
+    const loaded = [positions.data, history.data, records.data].flatMap(item => aliasesFromPayload(item))
+    return indexStockNames([...loaded, ...snapshotAliases(marketSnapshot.data?.rows)])
+  }, [positions.data, history.data, records.data, marketSnapshot.data])
 
   return (
     <div className="flex h-full flex-col bg-base">
