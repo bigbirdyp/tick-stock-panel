@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { Pencil, Trash2 } from 'lucide-react'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { isTradeJournalError } from './errors'
+import { resolveSymbol } from './symbol'
 import type { DailyReview, HistoryRow, Pagination, Position, TradeRecord } from './types'
 import { LEGACY_TRADER_LABEL } from './types'
 
@@ -52,8 +53,34 @@ function TableWrap({ children }: { children: ReactNode }) {
 
 const th = 'whitespace-nowrap border-b border-border bg-elevated/40 px-4 py-2 font-medium text-muted'
 const td = 'whitespace-nowrap border-b border-border/50 px-4 py-3 text-secondary'
+const stockButtonClass = 'cursor-pointer rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
-export function PositionTable({ rows }: { rows: Position[] }) {
+type StockRow = { code: string; symbol: string; name: string }
+
+// 只接受 resolveSymbol(code) 的结果。已有 symbol 必须与它一致，或本身就是同一六位代码。
+// 对不上、或代码无法识别交易所时返回 null，调用方保持纯文本，不猜后缀。
+function openableSymbol(row: StockRow): string | null {
+  const code = row.code.trim()
+  const resolved = resolveSymbol(code)
+  if (resolved == null) return null
+  const existing = row.symbol.trim()
+  if (existing === '' || existing === resolved || resolveSymbol(existing) === resolved) return resolved
+  return null
+}
+
+function StockIdentity({ row, onPreview }: { row: StockRow; onPreview?: (symbol: string, name: string) => void }) {
+  const symbol = openableSymbol(row)
+  if (symbol == null || onPreview == null) {
+    return <><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></>
+  }
+  const open = () => onPreview(symbol, row.name)
+  return <>
+    <button type="button" className={`font-medium text-foreground ${stockButtonClass}`} aria-label={`查看 ${row.name} 详情`} onClick={open}>{row.name}</button>
+    <button type="button" className={`ml-2 font-mono text-muted ${stockButtonClass}`} aria-label={`查看 ${row.symbol || symbol} 详情`} onClick={open}>{row.symbol || symbol}</button>
+  </>
+}
+
+export function PositionTable({ rows, onPreview }: { rows: Position[]; onPreview?: (symbol: string, name: string) => void }) {
   return (
     <TableWrap>
       <thead><tr>
@@ -62,7 +89,7 @@ export function PositionTable({ rows }: { rows: Position[] }) {
       <tbody>{rows.map(row => (
         <tr key={row.position_key} className="hover:bg-elevated/30">
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
+          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
           <td className={td}>{row.open_date}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
           <td className={`${td} font-mono`}>{money(row.cost, 4)}</td>
@@ -77,7 +104,7 @@ export function PositionTable({ rows }: { rows: Position[] }) {
   )
 }
 
-export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
+export function HistoryTable({ rows, onPreview }: { rows: HistoryRow[]; onPreview?: (symbol: string, name: string) => void }) {
   return (
     <TableWrap>
       <thead><tr>
@@ -86,7 +113,7 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
       <tbody>{rows.map(row => (
         <tr key={row.history_id} className="hover:bg-elevated/30">
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
+          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
           <td className={td}>{row.open_date}</td>
           <td className={td}>{row.close_date}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
@@ -101,7 +128,7 @@ export function HistoryTable({ rows }: { rows: HistoryRow[] }) {
   )
 }
 
-export function RecordTable({ rows, onEdit, onDelete }: { rows: TradeRecord[]; onEdit: (record: TradeRecord) => void; onDelete: (record: TradeRecord) => void }) {
+export function RecordTable({ rows, onEdit, onDelete, onPreview }: { rows: TradeRecord[]; onEdit: (record: TradeRecord) => void; onDelete: (record: TradeRecord) => void; onPreview?: (symbol: string, name: string) => void }) {
   return (
     <TableWrap>
       <thead><tr>
@@ -111,7 +138,7 @@ export function RecordTable({ rows, onEdit, onDelete }: { rows: TradeRecord[]; o
         <tr key={row.id} className="hover:bg-elevated/30">
           <td className={td}>{row.trade_date}<span className="ml-1 text-muted">{row.trade_time ?? ''}</span></td>
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></td>
+          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
           <td className={td}><span className={row.side === 'buy' ? 'text-bull' : 'text-bear'}>{row.side === 'buy' ? '买入' : '卖出'}</span></td>
           <td className={`${td} font-mono`}>{money(row.price, 4)}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>

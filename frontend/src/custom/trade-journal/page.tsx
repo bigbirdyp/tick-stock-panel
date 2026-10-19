@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, RefreshCw } from 'lucide-react'
 import { Modal } from '@/components/Modal'
+import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { toast } from '@/components/Toast'
 import { QK } from '@/lib/queryKeys'
@@ -106,6 +107,8 @@ export function TradeJournalPage() {
   const [codeInput, setCodeInput] = useState('')
   const [recordEditor, setRecordEditor] = useState<TradeRecord | 'new' | null>(null)
   const [reviewEditor, setReviewEditor] = useState<DailyReview | 'new' | null>(null)
+  // 预览只记当前股票，不写地址栏，也不改交易者、栏目、筛选和分页。
+  const [stockPreview, setStockPreview] = useState<{ symbol: string; name: string } | null>(null)
   const [deletion, setDeletion] = useState<Deletion | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<unknown>(null)
@@ -354,17 +357,17 @@ export function TradeJournalPage() {
 
             {tab === 'positions' && <>
               <ResultState loading={positions.isPending} error={positions.error} empty={positions.data?.data.positions.length === 0} onRetry={() => void positions.refetch()} />
-              {positions.data?.data.positions.length ? <PositionTable rows={positions.data.data.positions} /> : null}
+              {positions.data?.data.positions.length ? <PositionTable rows={positions.data.data.positions} onPreview={(symbol, name) => setStockPreview({ symbol, name })} /> : null}
               <Pager pagination={positions.data?.data.pagination} onPage={offset => setPositionQuery(query => ({ ...query, offset }))} />
             </>}
             {tab === 'history' && <>
               <ResultState loading={history.isPending} error={history.error} empty={history.data?.data.history.length === 0} onRetry={() => void history.refetch()} />
-              {history.data?.data.history.length ? <HistoryTable rows={history.data.data.history} /> : null}
+              {history.data?.data.history.length ? <HistoryTable rows={history.data.data.history} onPreview={(symbol, name) => setStockPreview({ symbol, name })} /> : null}
               <Pager pagination={history.data?.data.pagination} onPage={offset => setHistoryQuery(query => ({ ...query, offset }))} />
             </>}
             {tab === 'records' && <>
               <ResultState loading={records.isPending} error={records.error} empty={records.data?.data.records.length === 0} onRetry={() => void records.refetch()} />
-              {records.data?.data.records.length ? <RecordTable rows={records.data.data.records} onEdit={setRecordEditor} onDelete={item => askDelete({ kind: 'record', item })} /> : null}
+              {records.data?.data.records.length ? <RecordTable rows={records.data.data.records} onEdit={setRecordEditor} onDelete={item => askDelete({ kind: 'record', item })} onPreview={(symbol, name) => setStockPreview({ symbol, name })} /> : null}
               <Pager pagination={records.data?.data.pagination} onPage={offset => setRecordQuery(query => ({ ...query, offset }))} />
             </>}
             {tab === 'reviews' && <>
@@ -376,6 +379,7 @@ export function TradeJournalPage() {
         </div>
       </div>
 
+      <StockPreviewDialog symbol={stockPreview?.symbol ?? null} name={stockPreview?.name} onClose={() => setStockPreview(null)} />
       {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={recordEditor === 'new' ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
       {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} defaultTrader={reviewEditor === 'new' ? reviewQuery.trader ?? '' : ''} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
       {deletion && <Modal onClose={() => !deleting && setDeletion(null)} ariaLabel="确认删除" panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface p-5 shadow-xl" closeOnBackdrop={!deleting}>
