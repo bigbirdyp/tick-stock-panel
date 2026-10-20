@@ -1,5 +1,9 @@
-// One POST /api/kline/daily-batch. No cache, no fallback GET, no store.
+// One POST /api/kline/daily-batch. Success-only memory cache.
+// No fallback GET, no store.
 import { selectDailyQuote } from './daily-quotes.js';
+
+const CACHE_TTL_MS = 60 * 1000;
+const CACHE_MAX_ENTRIES = 128;
 
 function dedupeSymbols(symbols) {
   const seen = new Set();
@@ -10,6 +14,12 @@ function dedupeSymbols(symbols) {
     unique.push(symbol);
   }
   return unique;
+}
+
+// asOf plus sorted deduped symbols. Request body order stays first-seen.
+function quoteCacheKey(symbols, asOf) {
+  const sorted = symbols.slice().sort();
+  return `${JSON.stringify(asOf)}\0${JSON.stringify(sorted)}`;
 }
 
 function isAbortError(err, signal) {
@@ -57,21 +67,44 @@ function barsBySymbol(payload) {
   return data;
 }
 
+function copyQuotes(quotes) {
+  return new Map(quotes);
+}
+
 export function createDailyQuoteProvider({
   baseUrl = process.env.TSP_MARKET_BASE_URL || 'http://127.0.0.1:3018',
   fetchImpl = fetch,
   logger = console,
   timeoutMs = 3000,
+  now = Date.now,
 } = {}) {
   const root = String(baseUrl || 'http://127.0.0.1:3018').replace(/\/+$/, '');
   const endpoint = `${root}/api/kline/daily-batch`;
+  const cache = new Map();
+  const inflight = new Map();
 
-  return async function dailyQuotes(symbols, asOf) {
-    if (!Array.isArray(symbols) || symbols.length === 0) return new Map();
+  function pruneCache(at) {
+    for (const [key, entry] of cache) {
+      if (entry.expiresAt <= at) cache.delete(key);
+    }
+    while (cache.size > CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+    }
+  }
 
-    const unique = dedupeSymbols(symbols);
-    if (unique.length === 0) return new Map();
+  function remember(key, quotes) {
+    const storedAt = now();
+    const stored = copyQuotes(quotes);
+    pruneCache(storedAt);
+    cache.delete(key);
+    cache.set(key, { expiresAt: storedAt + CACHE_TTL_MS, quotes: stored });
+    pruneCache(storedAt);
+    return stored;
+  }
 
+  // Failures return a Map and must not be stored. Only a parsed payload is cacheable.
+  async function requestDailyQuotes(unique, asOf) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -92,12 +125,12 @@ export function createDailyQuoteProvider({
       } catch (err) {
         const reason = isAbortError(err, controller.signal) ? 'timeout' : 'network';
         logFailure(logger, reason, null, unique.length);
-        return new Map();
+        return { cacheable: false, quotes: new Map() };
       }
 
       if (!response || response.ok !== true) {
         logFailure(logger, 'http', response ? response.status : null, unique.length);
-        return new Map();
+        return { cacheable: false, quotes: new Map() };
       }
 
       let payload;
@@ -106,13 +139,13 @@ export function createDailyQuoteProvider({
       } catch (err) {
         const reason = isAbortError(err, controller.signal) ? 'timeout' : 'json';
         logFailure(logger, reason, response.status, unique.length);
-        return new Map();
+        return { cacheable: false, quotes: new Map() };
       }
 
       const data = barsBySymbol(payload);
       if (!data) {
         logFailure(logger, 'bad_shape', response.status, unique.length);
-        return new Map();
+        return { cacheable: false, quotes: new Map() };
       }
 
       const quotes = new Map();
@@ -120,9 +153,35 @@ export function createDailyQuoteProvider({
         const quote = selectDailyQuote(data[symbol], asOf);
         if (quote) quotes.set(symbol, quote);
       }
-      return quotes;
+      return { cacheable: true, quotes };
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  return async function dailyQuotes(symbols, asOf) {
+    if (!Array.isArray(symbols) || symbols.length === 0) return new Map();
+
+    const unique = dedupeSymbols(symbols);
+    if (unique.length === 0) return new Map();
+
+    const key = quoteCacheKey(unique, asOf);
+    pruneCache(now());
+    const hit = cache.get(key);
+    if (hit) return copyQuotes(hit.quotes);
+
+    const pending = inflight.get(key);
+    if (pending) return copyQuotes(await pending);
+
+    const job = requestDailyQuotes(unique, asOf).then((result) => {
+      if (!result.cacheable) return result.quotes;
+      return remember(key, result.quotes);
+    });
+    inflight.set(key, job);
+    try {
+      return copyQuotes(await job);
+    } finally {
+      inflight.delete(key);
     }
   };
 }
