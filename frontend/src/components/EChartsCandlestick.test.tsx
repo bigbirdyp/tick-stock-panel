@@ -1,22 +1,52 @@
 // @vitest-environment jsdom
-import { act } from 'react'
+import { act, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { EChartsCandlestick, type ChartMarker, type OHLC } from './EChartsCandlestick'
 
-const chart = vi.hoisted(() => ({
-  handlers: {} as Record<string, (event?: any) => void>,
-  setOption: vi.fn(),
-  on: vi.fn(),
-  off: vi.fn(),
-  dispatchAction: vi.fn(),
-  resize: vi.fn(),
-  dispose: vi.fn(),
-  getZr: () => ({ on: vi.fn(), off: vi.fn() }),
-  getOption: () => ({ dataZoom: [{ start: 0, end: 100 }] }),
-  containPixel: () => false,
-  convertFromPixel: () => [0, 0],
-}))
+const chart = vi.hoisted(() => {
+  const zoomState = { current: { start: 0, end: 100 } as Record<string, number | string> }
+  return {
+    handlers: {} as Record<string, (event?: any) => void>,
+    zoomState,
+    setOption: vi.fn((option?: { dataZoom?: Array<Record<string, number | string>> }) => {
+      const zoom = option?.dataZoom?.[0]
+      if (zoom) zoomState.current = { ...zoom }
+    }),
+    on: vi.fn(),
+    off: vi.fn(),
+    // 与 ECharts setRawRange 一致：只传百分比时清掉成对的 startValue/endValue。
+    dispatchAction: vi.fn((action?: {
+      type?: string
+      start?: number
+      end?: number
+      startValue?: number | string
+      endValue?: number | string
+    }) => {
+      if (action?.type !== 'dataZoom') return
+      const next = { ...zoomState.current }
+      if (action.start != null || action.startValue != null) {
+        if (action.start != null) next.start = action.start
+        else delete next.start
+        if (action.startValue != null) next.startValue = action.startValue
+        else delete next.startValue
+      }
+      if (action.end != null || action.endValue != null) {
+        if (action.end != null) next.end = action.end
+        else delete next.end
+        if (action.endValue != null) next.endValue = action.endValue
+        else delete next.endValue
+      }
+      zoomState.current = next
+    }),
+    resize: vi.fn(),
+    dispose: vi.fn(),
+    getZr: () => ({ on: vi.fn(), off: vi.fn() }),
+    getOption: () => ({ dataZoom: [{ ...zoomState.current }] }),
+    containPixel: () => false,
+    convertFromPixel: () => [0, 0],
+  }
+})
 
 vi.mock('echarts', () => ({ init: () => chart }))
 
@@ -33,7 +63,9 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   chart.handlers = {}
+  chart.zoomState.current = { start: 0, end: 100 }
   chart.setOption.mockClear()
+  chart.dispatchAction.mockClear()
   chart.on.mockImplementation((name: string, callback: (event?: any) => void) => {
     chart.handlers[name] = callback
   })
@@ -305,4 +337,218 @@ it('切标的后 dataZoom 重建仍使用当前逐笔，不回到上一只', asy
   expect(tip.textContent).toContain('NEW-SELL')
   expect(tip.textContent).toContain('价 2.5')
   expect(tip.textContent).not.toContain('OLD')
+})
+
+const WINDOW_DATES = Array.from({ length: 10 }, (_, index) => `2024-04-${String(index + 1).padStart(2, '0')}`)
+
+function datedRows(dates: string[], base = 10): OHLC[] {
+  return dates.map(date => ({ date, open: base, high: base + 1, low: base - 1, close: base, volume: 1 }))
+}
+
+function buy(date: string, trader: string): NonNullable<ChartMarker['trades']>[number] {
+  return { date, side: 'buy', price: 1, quantity: 1, trader }
+}
+
+function outsideNotice(): HTMLElement | null {
+  const found = [...host.querySelectorAll('div.text-muted')].find(element =>
+    (element.textContent ?? '').includes('不在当前区间'))
+  return found instanceof HTMLElement ? found : null
+}
+
+/** 记录每次提交到 DOM 的文字，用来抓住切股后、绘制前的旧计数。 */
+function ZoomFrames({ frames, children }: { frames: string[]; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    frames.push(ref.current?.textContent ?? '')
+  })
+  return <div ref={ref}>{children}</div>
+}
+
+async function renderWindow(options: {
+  symbol?: string
+  dates?: string[]
+  markers?: ChartMarker[]
+  visibleBars?: number | 'all'
+  frames?: string[]
+}) {
+  const dates = options.dates ?? WINDOW_DATES
+  const chartNode = (
+    <EChartsCandlestick
+      data={datedRows(dates)}
+      markers={options.markers}
+      symbol={options.symbol ?? '600000'}
+      height={400}
+      showInfoBar={false}
+      visibleBars={options.visibleBars ?? 4}
+      activeIndicators={['vol']}
+    />
+  )
+  await act(async () => root.render(
+    options.frames ? <ZoomFrames frames={options.frames}>{chartNode}</ZoomFrames> : chartNode,
+  ))
+}
+
+async function fireZoom(slice: Record<string, number | string>) {
+  chart.zoomState.current = { ...slice }
+  await act(async () => { chart.handlers.dataZoom?.() })
+}
+
+it('初始尾部窗口把更早的逐笔算进 N，窗口端点当天不算', async () => {
+  const early = WINDOW_DATES[0]
+  const justOutside = WINDOW_DATES[4]
+  const boundary = WINDOW_DATES[5]
+  await renderWindow({
+    markers: [
+      tradeMarker(early, [buy(early, '甲'), { date: early, side: 'sell', price: 2, quantity: 1, trader: '乙' }]),
+      tradeMarker(justOutside, [buy(justOutside, '丙')]),
+      tradeMarker(boundary, [buy(boundary, '丁')]),
+      tradeMarker(WINDOW_DATES[9], [buy(WINDOW_DATES[9], '戊')]),
+    ],
+  })
+
+  expect(outsideNotice()?.textContent).toBe('有 3 笔交易不在当前区间')
+})
+
+it('停牌缺日和区间外的日期按逐笔计入，可见 K 线当天不计', async () => {
+  const dates = ['2024-05-06', '2024-05-08', '2024-05-09']
+  const gap = '2024-05-07'
+  const before = '2024-05-05'
+  await renderWindow({
+    dates,
+    visibleBars: 'all',
+    markers: [
+      tradeMarker(before, [buy(before, '区间外')]),
+      tradeMarker(gap, [
+        buy(gap, '缺日买'),
+        { date: gap, side: 'sell', price: 2, quantity: 1, trader: '缺日卖' },
+      ]),
+      tradeMarker(dates[1], [buy(dates[1], '可见')]),
+    ],
+  })
+
+  expect(outsideNotice()?.textContent).toBe('有 3 笔交易不在当前区间')
+})
+
+it('同一天买卖按逐笔计数，不按标记个数', async () => {
+  const date = WINDOW_DATES[0]
+  await renderWindow({
+    markers: [tradeMarker(date, [
+      buy(date, '甲'),
+      { date, side: 'sell', price: 2, quantity: 1, trader: '乙' },
+    ], '买/卖')],
+  })
+
+  expect(lastKMarkData()).toHaveLength(1)
+  expect(outsideNotice()?.textContent).toBe('有 2 笔交易不在当前区间')
+})
+
+it('缩放拖入拖出后笔数跟着变，端点和全部窗口都不误计', async () => {
+  const early = WINDOW_DATES[0]
+  const boundary = WINDOW_DATES[5]
+  await renderWindow({
+    markers: [
+      tradeMarker(early, [buy(early, '甲'), { date: early, side: 'sell', price: 2, quantity: 1, trader: '乙' }]),
+      tradeMarker(WINDOW_DATES[4], [buy(WINDOW_DATES[4], '丙')]),
+      tradeMarker(boundary, [buy(boundary, '丁')]),
+    ],
+  })
+  expect(outsideNotice()?.textContent).toBe('有 3 笔交易不在当前区间')
+
+  await fireZoom({ start: 0, end: 100 })
+  expect(outsideNotice()).toBeNull()
+
+  await fireZoom({ start: 0, end: 40, startValue: 0, endValue: 4 })
+  expect(outsideNotice()?.textContent).toBe('有 1 笔交易不在当前区间')
+
+  await fireZoom({ start: 60, end: 100 })
+  expect(outsideNotice()?.textContent).toBe('有 3 笔交易不在当前区间')
+})
+
+it('有起止值时按类别序号或日期定窗口，不按百分比', async () => {
+  const early = WINDOW_DATES[0]
+  await renderWindow({
+    markers: [
+      tradeMarker(early, [buy(early, '甲')]),
+      tradeMarker(WINDOW_DATES[4], [buy(WINDOW_DATES[4], '丙')]),
+    ],
+  })
+  expect(outsideNotice()?.textContent).toBe('有 2 笔交易不在当前区间')
+
+  await fireZoom({ start: 60, end: 100, startValue: 0, endValue: WINDOW_DATES.length - 1 })
+  expect(outsideNotice()).toBeNull()
+
+  await fireZoom({ start: 0, end: 100, startValue: WINDOW_DATES[5], endValue: WINDOW_DATES[9] })
+  expect(outsideNotice()?.textContent).toBe('有 2 笔交易不在当前区间')
+})
+
+it('换标的后每一帧都用当前数据，不闪上一只的笔数', async () => {
+  const frames: string[] = []
+  const early = WINDOW_DATES[0]
+  await renderWindow({
+    frames,
+    symbol: '600000',
+    visibleBars: 'all',
+    markers: [tradeMarker(early, Array.from({ length: 5 }, (_, index) => buy(early, `A${index}`)))],
+  })
+  expect(outsideNotice()).toBeNull()
+
+  const beforeSwitch = frames.length
+  await renderWindow({
+    frames,
+    symbol: '000001',
+    visibleBars: 4,
+    markers: [tradeMarker(early, [buy(early, 'B')])],
+  })
+
+  expect(outsideNotice()?.textContent).toBe('有 1 笔交易不在当前区间')
+  const switched = frames.slice(beforeSwitch)
+  expect(switched.length).toBeGreaterThan(0)
+  for (const text of switched) {
+    expect(text).toContain('有 1 笔交易不在当前区间')
+    expect(text).not.toContain('有 5 笔交易不在当前区间')
+  }
+})
+
+it('没有逐笔、标记未就绪或换掉标记时不显示区间提示', async () => {
+  const early = WINDOW_DATES[0]
+  await renderWindow({
+    markers: [{ date: early, kind: 'buy', label: '旧标记' }],
+  })
+  expect(outsideNotice()).toBeNull()
+  expect(lastKMarkData()[0].symbol).toBe('arrow')
+  expect(lastOptionWithTooltip().tooltip.trigger).toBe('axis')
+  expect(lastOptionWithTooltip().tooltip.axisPointer.type).toBe('cross')
+
+  await renderWindow({
+    markers: [tradeMarker(early, [buy(early, '甲'), buy(early, '乙'), buy(early, '丙')])],
+  })
+  expect(outsideNotice()?.textContent).toBe('有 3 笔交易不在当前区间')
+  expect(lastOptionWithTooltip().tooltip.trigger).toBe('item')
+  expect(lastOptionWithTooltip().tooltip.axisPointer.type).toBe('cross')
+
+  await renderWindow({ markers: undefined })
+  expect(outsideNotice()).toBeNull()
+  expect(host.textContent).not.toContain('有 0 笔')
+
+  await renderWindow({
+    markers: [{ date: early, kind: 'sell', label: '仍无逐笔' }],
+  })
+  expect(outsideNotice()).toBeNull()
+  expect(host.textContent).not.toContain('有 3 笔交易不在当前区间')
+})
+
+it('同步可见窗口不会反复重建图表', async () => {
+  const early = WINDOW_DATES[0]
+  await renderWindow({
+    markers: [tradeMarker(early, [buy(early, '甲')])],
+  })
+  const afterMount = chart.setOption.mock.calls.length
+  await act(async () => {})
+  expect(chart.setOption.mock.calls.length).toBe(afterMount)
+
+  await fireZoom({ start: 0, end: 100 })
+  expect(chart.setOption.mock.calls.length).toBe(afterMount)
+  await act(async () => { chart.handlers.dataZoom?.() })
+  expect(chart.setOption.mock.calls.length).toBe(afterMount)
+  expect(outsideNotice()).toBeNull()
 })

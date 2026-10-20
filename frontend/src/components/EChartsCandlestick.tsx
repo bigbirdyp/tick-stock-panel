@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
 import * as echarts from 'echarts'
@@ -79,6 +79,9 @@ export interface VolumeCompareConfig {
   enabled: boolean
   days: number
 }
+
+const DEFAULT_ACTIVE_INDICATORS: string[] = []
+const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
 
 interface SubChartContext {
   compact: boolean
@@ -382,6 +385,108 @@ function markerTrades(marker: ChartMarker): readonly ChartTradeDetail[] | null {
   const trades = marker.trades
   if (trades == null || trades.length === 0) return null
   return trades
+}
+
+interface ZoomSlice {
+  start?: number
+  end?: number
+  startValue?: number | string
+  endValue?: number | string
+}
+
+function zoomSliceEqual(a: ZoomSlice | null, b: ZoomSlice | null): boolean {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  return a.start === b.start && a.end === b.end
+    && a.startValue === b.startValue && a.endValue === b.endValue
+}
+
+function readZoomSlice(zoom: ZoomSlice | null | undefined): ZoomSlice | null {
+  if (zoom == null) return null
+  const slice: ZoomSlice = {}
+  if (typeof zoom.start === 'number' && Number.isFinite(zoom.start)) slice.start = zoom.start
+  if (typeof zoom.end === 'number' && Number.isFinite(zoom.end)) slice.end = zoom.end
+  if (typeof zoom.startValue === 'number' && Number.isFinite(zoom.startValue)) slice.startValue = zoom.startValue
+  else if (typeof zoom.startValue === 'string' && zoom.startValue !== '') slice.startValue = zoom.startValue
+  if (typeof zoom.endValue === 'number' && Number.isFinite(zoom.endValue)) slice.endValue = zoom.endValue
+  else if (typeof zoom.endValue === 'string' && zoom.endValue !== '') slice.endValue = zoom.endValue
+  if (slice.start == null && slice.end == null && slice.startValue == null && slice.endValue == null) return null
+  return slice
+}
+
+function clampIndex(value: number, last: number): number {
+  return Math.min(last, Math.max(0, value))
+}
+
+/** 类别轴把 0–100 的百分比线性映到 [0, n-1]，再四舍五入到 K 线序号。 */
+function categoryIndexFromPercent(percent: number, last: number): number {
+  if (last <= 0) return 0
+  if (percent <= 0) return 0
+  if (percent >= 100) return last
+  return clampIndex(Math.round((percent / 100) * last), last)
+}
+
+function categoryIndexFromValue(value: number | string, dates: readonly string[]): number {
+  const last = dates.length - 1
+  if (typeof value === 'number') return clampIndex(Math.round(value), last)
+  const exact = dates.indexOf(value)
+  if (exact >= 0) return exact
+  let insert = 0
+  while (insert < dates.length && dates[insert] < value) insert++
+  return clampIndex(insert, last)
+}
+
+/**
+ * 当前 dataZoom 里真实存在的 K 线日期。
+ * 有 startValue/endValue 时用类别序号或日期；只有百分比时按类别轴映射并夹紧。
+ * 停牌日和数据里没有的日期不会进入这个集合。
+ */
+function visibleKlineDates(
+  dates: readonly string[],
+  zoom: ZoomSlice | null,
+  fallback: { start: number; end: number },
+): Set<string> {
+  const visible = new Set<string>()
+  const last = dates.length - 1
+  if (last < 0) return visible
+  const hasValue = zoom != null && zoom.startValue != null && zoom.endValue != null
+  let startIndex = hasValue
+    ? categoryIndexFromValue(zoom.startValue as number | string, dates)
+    : categoryIndexFromPercent(
+      typeof zoom?.start === 'number' ? zoom.start : fallback.start,
+      last,
+    )
+  let endIndex = hasValue
+    ? categoryIndexFromValue(zoom.endValue as number | string, dates)
+    : categoryIndexFromPercent(
+      typeof zoom?.end === 'number' ? zoom.end : fallback.end,
+      last,
+    )
+  if (startIndex > endIndex) {
+    const swap = startIndex
+    startIndex = endIndex
+    endIndex = swap
+  }
+  for (let index = startIndex; index <= endIndex; index++) visible.add(dates[index])
+  return visible
+}
+
+/** 可见日期以外的逐笔合计。markers 未就绪时返回 null，避免把加载失败说成 0。 */
+function countTradesOutsideWindow(
+  markers: readonly ChartMarker[] | undefined,
+  dates: readonly string[],
+  zoom: ZoomSlice | null,
+  fallback: { start: number; end: number },
+): number | null {
+  if (markers == null) return null
+  const visible = visibleKlineDates(dates, zoom, fallback)
+  let count = 0
+  for (const marker of markers) {
+    const trades = markerTrades(marker)
+    if (!trades) continue
+    if (!visible.has(marker.date)) count += trades.length
+  }
+  return count
 }
 
 /** 只看逐笔方向。没有买也没有卖时返回 null，调用方继续走旧标记。 */
@@ -1071,8 +1176,8 @@ export function EChartsCandlestick({
   onDateClick,
   onPriceDoubleClick,
   visibleBars = 60,
-  activeIndicators = [],
-  volumeCompare = { enabled: true, days: 1 },
+  activeIndicators = DEFAULT_ACTIVE_INDICATORS,
+  volumeCompare = DEFAULT_VOLUME_COMPARE,
   addedDate,
 }: Props) {
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
@@ -1091,6 +1196,15 @@ export function EChartsCandlestick({
   const infoIdxRef = useRef<number>(data.length - 1)
   const compactRef = useRef(false)
   const userZoomRef = useRef<{ start: number; end: number } | null>(null)
+  // 只把 dataZoom 窗口放进 React state。笔数在渲染时用当前 markers/日期现算。
+  // 切股或 K 线根数变化时，这一帧也不能读上一窗口，否则会先闪出旧区间的笔数。
+  const [outsideZoom, setOutsideZoom] = useState<ZoomSlice | null>(null)
+  const [zoomScope, setZoomScope] = useState({ symbol: _symbol, length: data.length })
+  const zoomScopeMatches = zoomScope.symbol === _symbol && zoomScope.length === data.length
+  if (!zoomScopeMatches) {
+    setZoomScope({ symbol: _symbol, length: data.length })
+    setOutsideZoom(null)
+  }
   // dataZoom 监听只在图表创建时注册一次, 直接调用会一直执行「创建那次渲染」的 updateCompactPresentation:
   // 它的 data/dateIndexMap/markers 停在旧标的, 会把上一只的买卖标记 merge 回新标的图上。
   // 与 dataRef/getInfoBarHTMLRef 同法, 经 ref 取最新一次渲染的函数。
@@ -1323,13 +1437,14 @@ export function EChartsCandlestick({
     }
     chart.getZr().on('dblclick', handlePriceDoubleClick)
 
-    // dataZoom → 只更新 ref，不触发 React re-render
-    // compact 变化时需要增量更新 markPoint
+    // dataZoom：紧凑态仍只增量改 markPoint。窗口写入 state 后由图下文字重渲染，不重建图表。
     chart.on('dataZoom', () => {
       const opt = chart.getOption() as any
       const zoom = opt?.dataZoom?.[0]
       if (!zoom) return
       userZoomRef.current = { start: zoom.start, end: zoom.end }
+      const slice = readZoomSlice(zoom)
+      if (slice) setOutsideZoom(prev => (zoomSliceEqual(prev, slice) ? prev : slice))
 
       const d = dataRef.current
       const total = d.length
@@ -1408,6 +1523,8 @@ export function EChartsCandlestick({
     } else {
       chart.dispatchAction({ type: 'dataZoom', start: initialZoom.start, end: initialZoom.end })
     }
+    const applied = readZoomSlice((chart.getOption() as { dataZoom?: ZoomSlice[] } | undefined)?.dataZoom?.[0])
+    if (applied) setOutsideZoom(prev => (zoomSliceEqual(prev, applied) ? prev : applied))
 
     // 初始信息栏
     const infoEl = infoBarRef.current
@@ -1460,6 +1577,13 @@ export function EChartsCandlestick({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const outsideTradeCount = countTradesOutsideWindow(
+    markers,
+    dates,
+    zoomScopeMatches ? outsideZoom : null,
+    initialZoom,
+  )
+
   return (
     <div ref={hoverSurfaceRef} className="w-full">
       {/* 主图信息栏 — 内容由 JS 直接操作 innerHTML */}
@@ -1470,6 +1594,11 @@ export function EChartsCandlestick({
 
       {/* ECharts canvas */}
       <div ref={containerRef} className="w-full" style={{ height: chartHeight }} />
+      {outsideTradeCount != null && outsideTradeCount > 0 && (
+        <div className="px-2 py-0.5 font-mono text-[11px] text-muted">
+          有 {outsideTradeCount} 笔交易不在当前区间
+        </div>
+      )}
     </div>
   )
 }
