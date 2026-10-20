@@ -1,9 +1,11 @@
-// One POST /api/kline/daily-batch, then GET /api/kline/daily only for symbols
-// the batch selected no quote for. Not done: a newer <= asOf bar with no
-// raw_close is still covered here by an older raw_close. qfq `close` is never
-// a raw price. This cache stores a fully cacheable merged result. GET hits also
-// stay in the fallback cache for 60s. Any non-cacheable GET is not stored here,
-// so a later call can recover that symbol without dropping the others.
+// One POST /api/kline/daily-batch, then GET /api/kline/daily for every symbol
+// the batch left without a quote, and for every symbol whose selected raw is
+// older than a later real bar on or before asOf. Future bars are not that
+// date target. A failed GET leaves only that symbol unavailable and does not
+// keep the older raw. qfq `close` is never a raw price. This cache stores a
+// fully cacheable merged result. GET hits also stay in the fallback cache for
+// 60s. Any non-cacheable GET is not stored here, so a later call can recover
+// that symbol without dropping the others.
 // No store.
 import { createDailyQuoteFallback } from './daily-quote-fallback.js';
 import { selectDailyQuote } from './daily-quotes.js';
@@ -75,6 +77,28 @@ function barsBySymbol(payload) {
 
 function copyQuotes(quotes) {
   return new Map(quotes);
+}
+
+// Newest real bar date on or before asOf. The synthetic raw_close is only a
+// probe so selectDailyQuote applies its calendar-day and future-date rules.
+// The probe price is never returned as a quote.
+function latestRealBarDate(rows, asOf) {
+  if (!Array.isArray(rows)) return null;
+  const probed = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    probed.push({ date: row.date, raw_close: '1' });
+  }
+  const marker = selectDailyQuote(probed, asOf);
+  return marker ? marker.price_as_of : null;
+}
+
+// GET when the batch has no usable raw, or when a newer calendar bar on or
+// before asOf has no raw. Future rows cannot move this date.
+function needsDailyLookup(rows, asOf, quote) {
+  if (!quote) return true;
+  const latest = latestRealBarDate(rows, asOf);
+  return latest !== null && latest > quote.price_as_of;
 }
 
 export function createDailyQuoteProvider({
@@ -163,19 +187,20 @@ export function createDailyQuoteProvider({
         return { cacheable: false, quotes: new Map() };
       }
 
+      // selectDailyQuote still chooses the raw price and its real date.
+      // selected keeps only symbols that already cover the newest <= asOf bar.
+      // An older raw is a lookup, not a result: a failed GET must not put it back.
+      // Other symbols stay on their batch quotes.
       const selected = new Map();
-      for (const symbol of unique) {
-        const quote = selectDailyQuote(data[symbol], asOf);
-        if (quote) selected.set(symbol, quote);
-      }
-
-      // Basic path only. Fallback runs for symbols selectDailyQuote dropped
-      // entirely. Not done: if a newer <= asOf bar has no raw_close and an
-      // older bar still has raw_close, this keeps the older quote and does
-      // not GET. Date and raw_close checks stay inside selectDailyQuote.
       const missing = [];
       for (const symbol of unique) {
-        if (!selected.has(symbol)) missing.push(symbol);
+        const rows = data[symbol];
+        const quote = selectDailyQuote(rows, asOf);
+        if (!needsDailyLookup(rows, asOf, quote)) {
+          selected.set(symbol, quote);
+          continue;
+        }
+        missing.push(symbol);
       }
       if (missing.length === 0) return { cacheable: true, quotes: selected };
 

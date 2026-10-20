@@ -229,3 +229,66 @@ test('a different asOf refetches and concurrent callers share one POST', async (
     price_status: 'stale',
   });
 });
+
+test('a newer qfq-only bar gets that day raw and does not keep the older batch quote', async () => {
+  const calls = [];
+  const provider = createDailyQuoteProvider({
+    baseUrl: 'http://market.example',
+    fetchImpl(url, init) {
+      calls.push({ url, method: init.method });
+      if (init.method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          json() {
+            return {
+              data: {
+                '000001.SZ': [
+                  { date: '2026-10-21', raw_close: '99.9', close: '80' },
+                  { date: AS_OF, close: '11.11' },
+                  { date: '2026-10-16', raw_close: '10.5', close: '9.9' },
+                ],
+                '600519.SH': [
+                  { date: '2026-10-21', raw_close: '1700', close: '1600' },
+                  { date: AS_OF, raw_close: '1680.5', close: '1500' },
+                ],
+              },
+            };
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          return {
+            symbol: '000001.SZ',
+            rows: [
+              { date: '2026-10-21', raw_close: '99.9', close: '88' },
+              { date: AS_OF, raw_close: '12.34', close: '13.13' },
+              { date: '2026-10-16', raw_close: '10.5', close: '9.9' },
+            ],
+          };
+        },
+      };
+    },
+  });
+
+  const quotes = await provider(['000001.SZ', '600519.SH'], AS_OF);
+
+  assert.deepEqual(calls.map((call) => call.method), ['POST', 'GET']);
+  assert.equal(calls[0].url, 'http://market.example/api/kline/daily-batch');
+  assert.equal(
+    calls[1].url,
+    'http://market.example/api/kline/daily?symbol=000001.SZ&end_date=2026-10-20&days=120',
+  );
+  assert.equal(quotes.size, 2);
+  assert.deepEqual(quotes.get('000001.SZ'), {
+    price: '12.34',
+    price_as_of: AS_OF,
+    price_status: 'fresh',
+  });
+  assert.equal(quotes.get('600519.SH').price, '1680.5');
+  assert.equal(quotes.get('600519.SH').price_as_of, AS_OF);
+  assert.equal(quotes.get('600519.SH').price_status, 'fresh');
+});
