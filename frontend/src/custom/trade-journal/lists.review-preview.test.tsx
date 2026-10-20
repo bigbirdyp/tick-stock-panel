@@ -106,19 +106,41 @@ it('原始六位和空 symbol 显示规范后缀，错误后缀不可点', () =>
     { ...position, position_key: 'pos-wrong', code: '600519', symbol: '600519.SZ', name: '错误后缀' },
   ]} onPreview={(symbol, name) => opened.push({ symbol, name })} />)
 
-  const buttons = previewButtons()
-  expect(buttons.map(button => ({ label: button.getAttribute('aria-label'), text: button.textContent }))).toEqual([
-    { label: '查看 贵州茅台 详情', text: '贵州茅台' },
-    { label: '查看 600519.SH 详情', text: '600519.SH' },
-    { label: '查看 平安银行 详情', text: '平安银行' },
-    { label: '查看 000001.SZ 详情', text: '000001.SZ' },
+  function stockShell(symbol: string, name: string) {
+    const shell = Array.from(container?.querySelectorAll('button, span') ?? []).find(el => {
+      const [code, label] = Array.from(el.children)
+      return code?.textContent === symbol && label?.textContent === name
+    })
+    return shell instanceof HTMLElement ? shell : null
+  }
+
+  const maotai = stockShell('600519.SH', '贵州茅台')
+  const pingan = stockShell('000001.SZ', '平安银行')
+  const wrong = stockShell('600519.SZ', '错误后缀')
+  expect(maotai?.tagName).toBe('BUTTON')
+  expect(pingan?.tagName).toBe('BUTTON')
+  expect([maotai, pingan].map(shell => ({
+    label: shell?.getAttribute('aria-label'),
+    code: shell?.children[0]?.textContent,
+    name: shell?.children[1]?.textContent,
+  }))).toEqual([
+    { label: '查看 贵州茅台 详情', code: '600519.SH', name: '贵州茅台' },
+    { label: '查看 平安银行 详情', code: '000001.SZ', name: '平安银行' },
   ])
+  expect(container?.querySelector('[aria-label="查看 600519.SH 详情"]')).toBeNull()
+  expect(container?.querySelector('[aria-label="查看 000001.SZ 详情"]')).toBeNull()
+  expect(wrong?.tagName).toBe('SPAN')
+  expect(wrong?.closest('tr')?.querySelector('button')).toBeNull()
   expect(container?.textContent).toContain('错误后缀')
   expect(container?.textContent).toContain('600519.SZ')
   expect(container?.querySelector('[aria-label="查看 错误后缀 详情"]')).toBeNull()
   expect(container?.querySelector('[aria-label="查看 600519.SZ 详情"]')).toBeNull()
 
-  for (const button of buttons) act(() => button.click())
+  for (const shell of [maotai, pingan]) {
+    const [code, name] = Array.from(shell?.children ?? [])
+    act(() => { if (name instanceof HTMLElement) name.click() })
+    act(() => { if (code instanceof HTMLElement) code.click() })
+  }
   expect(opened).toEqual([
     { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '600519.SH', name: '贵州茅台' },

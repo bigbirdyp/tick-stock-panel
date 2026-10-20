@@ -93,57 +93,94 @@ function render(node: ReactNode) {
   return container
 }
 
-function stockButtons(name: string, symbol: string) {
-  return {
-    name: container?.querySelector<HTMLButtonElement>(`[aria-label="查看 ${name} 详情"]`) ?? null,
-    code: container?.querySelector<HTMLButtonElement>(`[aria-label="查看 ${symbol} 详情"]`) ?? null,
-  }
+const SHELL = 'flex items-center gap-1 text-left min-w-0'
+const CODE = 'font-mono text-foreground text-xs group-hover:text-accent transition-colors duration-150'
+const NAME = 'text-xs text-secondary truncate group-hover:text-foreground transition-colors duration-150'
+
+function stockCells(name: string, symbol: string) {
+  return Array.from(container?.querySelectorAll('button, span') ?? []).flatMap(el => {
+    const [code, label] = Array.from(el.children)
+    if (code?.textContent !== symbol || label?.textContent !== name) return []
+    if (!(el instanceof HTMLElement) || !(code instanceof HTMLElement) || !(label instanceof HTMLElement)) return []
+    return [{ shell: el, code, name: label }]
+  })
 }
 
-function expectClickable(button: HTMLButtonElement | null) {
-  expect(button).not.toBeNull()
-  expect(button?.tagName).toBe('BUTTON')
-  expect(button?.type).toBe('button')
-  expect(button?.className).toContain('cursor-pointer')
-  expect(button?.className).toContain('hover:underline')
-  expect(button?.className).toContain('focus-visible:outline')
+function stockCell(name: string, symbol: string) {
+  return stockCells(name, symbol)[0] ?? null
+}
+
+function expectSharedStock(name: string, symbol: string, clickable: boolean) {
+  const cell = stockCell(name, symbol)
+  expect(cell, `${symbol} ${name}`).not.toBeNull()
+  expect(cell!.shell.tagName).toBe(clickable ? 'BUTTON' : 'SPAN')
+  if (clickable) expect((cell!.shell as HTMLButtonElement).type).toBe('button')
+  expect(cell!.shell.className).toBe(SHELL)
+  expect(cell!.code?.className).toBe(CODE)
+  expect(cell!.name?.className).toBe(NAME)
+  expect(Array.from(cell!.shell.children).map(el => el.textContent)).toEqual([symbol, name])
+
+  const row = cell!.shell.closest('tr')
+  expect(row?.className).toContain('group')
+  expect(row?.className).toContain('hover:bg-elevated/30')
+  const column = cell!.shell.closest('td')
+  expect(column?.className).toContain('px-1.5')
+  expect(column?.className).toContain('py-1.5')
+  expect(column?.className).toContain('border-b')
+  expect(column?.className).toContain('border-border/50')
+  expect(column?.className).not.toContain('px-4')
+  expect(column?.className).not.toMatch(/\b(?:w-|max-w-)/)
+  expect(cell!.shell.parentElement?.className).toBe('flex items-center gap-1 w-full')
+  return cell!
 }
 
 it('持仓名称和代码都打开规范化 symbol，无法识别的代码不可点', () => {
   const opened: Array<{ symbol: string; name: string }> = []
-  render(<PositionTable rows={[position, bShare]} onPreview={(symbol, name) => opened.push({ symbol, name })} />)
+  const bare: Position = { ...position, position_key: 'pos-bare', symbol: '600519' }
+  const mismatch: Position = { ...position, position_key: 'pos-mismatch', symbol: '600519.SZ', name: '错误后缀' }
+  render(<PositionTable rows={[position, bare, bShare, mismatch]} onPreview={(symbol, name) => opened.push({ symbol, name })} />)
 
-  const maotai = stockButtons('贵州茅台', '600519.SH')
-  expectClickable(maotai.name)
-  expectClickable(maotai.code)
-  expect(container?.querySelector('[aria-label="查看 B股样本 详情"]')).toBeNull()
-  expect(container?.querySelector('[aria-label="查看 900901.SH 详情"]')).toBeNull()
+  const maotaiCells = stockCells('贵州茅台', '600519.SH')
+  expect(maotaiCells).toHaveLength(2)
+  const maotai = expectSharedStock('贵州茅台', '600519.SH', true)
+  expect(maotaiCells.every(cell => cell.shell.tagName === 'BUTTON' && cell.shell.getAttribute('aria-label') === '查看 贵州茅台 详情')).toBe(true)
+  expect(Array.from(container?.querySelectorAll('span') ?? []).filter(el => el.textContent === '600519')).toHaveLength(0)
+
+  const plain = expectSharedStock('B股样本', '900901.SH', false)
+  expect(plain.shell.getAttribute('aria-label')).toBeNull()
+  expect(plain.shell.closest('tr')?.querySelector('button')).toBeNull()
+  const wrong = expectSharedStock('错误后缀', '600519.SZ', false)
+  expect(wrong.shell.closest('tr')?.querySelector('button')).toBeNull()
+  expect(container?.textContent).toContain('错误后缀')
+  expect(container?.textContent).toContain('600519.SZ')
 
   act(() => maotai.name!.click())
   act(() => maotai.code!.click())
-  maotai.code!.focus()
-  // jsdom 不实现按钮的 Enter 激活。未阻止默认行为时补一次 click，等同浏览器原生按钮。
-  const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
-  act(() => { maotai.code!.dispatchEvent(enter) })
-  expect(enter.defaultPrevented).toBe(false)
-  act(() => { maotai.code!.click() })
+  act(() => maotaiCells[1]?.code.click())
+  maotai.shell.focus()
+  // jsdom 不实现按钮的 Enter/Space 激活。未阻止默认行为时补一次 click，等同浏览器原生按钮。
+  for (const key of ['Enter', ' ']) {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+    act(() => { maotai.shell.dispatchEvent(event) })
+    expect(event.defaultPrevented).toBe(false)
+  }
+  act(() => { maotai.shell.click() })
 
   expect(opened).toEqual([
     { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '600519.SH', name: '贵州茅台' },
+    { symbol: '600519.SH', name: '贵州茅台' },
   ])
-  expect(document.activeElement).toBe(maotai.code)
+  expect(document.activeElement).toBe(maotai.shell)
 })
 
 it('历史收益名称和代码打开同一标的', () => {
   const opened: Array<{ symbol: string; name: string }> = []
   render(<HistoryTable rows={[history]} onPreview={(symbol, name) => opened.push({ symbol, name })} />)
-  const buttons = stockButtons('平安银行', '000001.SZ')
-  expectClickable(buttons.name)
-  expectClickable(buttons.code)
-  act(() => buttons.name!.click())
-  act(() => buttons.code!.click())
+  const cell = expectSharedStock('平安银行', '000001.SZ', true)
+  act(() => cell.name!.click())
+  act(() => cell.code!.click())
   expect(opened).toEqual([
     { symbol: '000001.SZ', name: '平安银行' },
     { symbol: '000001.SZ', name: '平安银行' },
@@ -160,11 +197,9 @@ it('交易记录名称和代码打开同一标的，编辑删除契约仍在', (
     onEdit={item => edited.push(item.id)}
     onDelete={item => deleted.push(item.id)}
   />)
-  const buttons = stockButtons('贵州茅台', '600519.SH')
-  expectClickable(buttons.name)
-  expectClickable(buttons.code)
-  act(() => buttons.name!.click())
-  act(() => buttons.code!.click())
+  const cell = expectSharedStock('贵州茅台', '600519.SH', true)
+  act(() => cell.name!.click())
+  act(() => cell.code!.click())
   act(() => container?.querySelector<HTMLButtonElement>('[aria-label="编辑 贵州茅台 2026-10-12 交易记录"]')?.click())
   act(() => container?.querySelector<HTMLButtonElement>('[aria-label="删除 贵州茅台 2026-10-12 交易记录"]')?.click())
   expect(opened).toEqual(['600519.SH:贵州茅台', '600519.SH:贵州茅台'])
@@ -174,6 +209,8 @@ it('交易记录名称和代码打开同一标的，编辑删除契约仍在', (
 
 it('不传预览回调时表格仍只接收原有参数', () => {
   render(<PositionTable rows={[position]} />)
+  const cell = expectSharedStock('贵州茅台', '600519.SH', false)
+  expect(cell.shell.getAttribute('role')).toBeNull()
   expect(container?.querySelector('button')).toBeNull()
   expect(container?.textContent).toContain('贵州茅台')
   expect(container?.textContent).toContain('600519.SH')

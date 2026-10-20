@@ -80,10 +80,23 @@ function previewDialog(container: HTMLElement) {
   return container.querySelector<HTMLElement>('[role="dialog"][aria-label="股票详情"]')
 }
 
-async function openPreview(container: HTMLElement, label: string) {
-  const button = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)
-  expect(button, label).not.toBeNull()
-  await act(async () => button!.click())
+function stockCell(container: HTMLElement, symbol: string, name: string) {
+  const shell = Array.from(container.querySelectorAll('button, span')).find(el => {
+    const [code, label] = Array.from(el.children)
+    return code?.textContent === symbol && label?.textContent === name
+  })
+  if (!(shell instanceof HTMLElement)) return null
+  const [code, label] = Array.from(shell.children)
+  return {
+    shell,
+    code: code instanceof HTMLElement ? code : null,
+    name: label instanceof HTMLElement ? label : null,
+  }
+}
+
+async function openPreviewFrom(container: HTMLElement, target: HTMLElement | null) {
+  expect(target).not.toBeNull()
+  await act(async () => target!.click())
   await vi.waitFor(() => expect(previewDialog(container)).not.toBeNull())
   return previewDialog(container)!
 }
@@ -101,7 +114,9 @@ it('持仓名称和代码打开茅台详情，关闭后交易者和栏目不变'
   expect(selectedTrader(container)).toBe('全部')
   expect(selectedColumn(container)).toBe('当前持仓')
 
-  const byName = await openPreview(container, '查看 贵州茅台 详情')
+  const holding = stockCell(container, '600519.SH', '贵州茅台')
+  expect(holding?.shell.tagName).toBe('BUTTON')
+  const byName = await openPreviewFrom(container, holding?.name ?? null)
   expect(byName.textContent).toContain('600519.SH')
   expect(byName.textContent).toContain('贵州茅台')
   await closePreview(container)
@@ -109,7 +124,7 @@ it('持仓名称和代码打开茅台详情，关闭后交易者和栏目不变'
   expect(selectedColumn(container)).toBe('当前持仓')
   expect(window.location.search).toBe('')
 
-  const byCode = await openPreview(container, '查看 600519.SH 详情')
+  const byCode = await openPreviewFrom(container, holding?.code ?? null)
   expect(byCode.textContent).toContain('600519.SH')
   expect(byCode.textContent).toContain('贵州茅台')
   await closePreview(container)
@@ -138,12 +153,13 @@ it('筛选后的记录和历史收益打开对应股票，关闭后交易者、�
   })
   const submit = Array.from(container.querySelectorAll('button')).find(button => button.textContent === '筛选')
   await act(async () => submit!.click())
-  await vi.waitFor(() => expect(container.querySelector('[aria-label="查看 000001.SZ 详情"]')).not.toBeNull())
+  await vi.waitFor(() => expect(stockCell(container, '000001.SZ', '平安银行')?.shell.tagName).toBe('BUTTON'))
   expect(listRecords.mock.calls.at(-1)?.[0]).toMatchObject({ trader: '杨鹏', code: '000001', offset: 0 })
   const filteredQuery = listRecords.mock.calls.at(-1)?.[0]
   const searchBefore = window.location.search
 
-  const byCode = await openPreview(container, '查看 000001.SZ 详情')
+  const recordCell = stockCell(container, '000001.SZ', '平安银行')
+  const byCode = await openPreviewFrom(container, recordCell?.code ?? null)
   expect(byCode.textContent).toContain('000001.SZ')
   expect(byCode.textContent).toContain('平安银行')
   await closePreview(container)
@@ -158,8 +174,9 @@ it('筛选后的记录和历史收益打开对应股票，关闭后交易者、�
   expect(container.textContent).not.toContain('贵州茅台')
 
   await clickColumn(container, '历史收益')
-  await vi.waitFor(() => expect(container.textContent).toContain('平安银行'))
-  const byName = await openPreview(container, '查看 平安银行 详情')
+  await vi.waitFor(() => expect(stockCell(container, '000001.SZ', '平安银行')?.shell.tagName).toBe('BUTTON'))
+  const historyCell = stockCell(container, '000001.SZ', '平安银行')
+  const byName = await openPreviewFrom(container, historyCell?.name ?? null)
   expect(byName.textContent).toContain('000001.SZ')
   expect(byName.textContent).toContain('平安银行')
   await closePreview(container)

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Pencil, Trash2 } from 'lucide-react'
+import { StockCell } from '@/components/stock-table/StockCell'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { isTradeJournalError } from './errors'
 import { openableSymbol } from './symbol'
@@ -54,22 +55,32 @@ function TableWrap({ children }: { children: ReactNode }) {
 
 const th = 'whitespace-nowrap border-b border-border bg-elevated/40 px-4 py-2 font-medium text-muted'
 const td = 'whitespace-nowrap border-b border-border/50 px-4 py-3 text-secondary'
+// 股票列只改 padding，边框仍跟日志其它单元格走。不要加固定宽，窄屏靠表格横滑。
+const stockTd = 'whitespace-nowrap border-b border-border/50 px-1.5 py-1.5 text-secondary'
 const stockButtonClass = 'cursor-pointer rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
 type StockRow = { code: string; symbol: string; name: string }
 
 function StockIdentity({ row, onPreview }: { row: StockRow; onPreview?: (symbol: string, name: string) => void }) {
   const symbol = openableSymbol(row.code, row.symbol)
-  if (symbol == null || onPreview == null) {
-    return <><span className="font-medium text-foreground">{row.name}</span><span className="ml-2 font-mono text-muted">{row.symbol}</span></>
+  // 能打开时界面上的代码必须是规范 symbol。对不上或无法识别时仍显示原来的 symbol 文本，只是不可点。
+  if (symbol != null && onPreview != null) {
+    const open = () => onPreview(symbol, row.name)
+    return (
+      <StockCell code={symbol} name={row.name} aria-label={`查看 ${row.name} 详情`} onClick={open} />
+    )
   }
-  const open = () => onPreview(symbol, row.name)
-  // 打开用的就是规范 symbol。代码按钮的文字和 aria-label 必须显示它，
-  // 六位或空白的 row.symbol 不能再原样留在界面上。
-  return <>
-    <button type="button" className={`font-medium text-foreground ${stockButtonClass}`} aria-label={`查看 ${row.name} 详情`} onClick={open}>{row.name}</button>
-    <button type="button" className={`ml-2 font-mono text-muted ${stockButtonClass}`} aria-label={`查看 ${symbol} 详情`} onClick={open}>{symbol}</button>
-  </>
+  return <StockCell code={row.symbol} name={row.name} />
+}
+
+function StockColumn({ row, onPreview }: { row: StockRow; onPreview?: (symbol: string, name: string) => void }) {
+  return (
+    <td className={stockTd}>
+      <div className="flex items-center gap-1 w-full">
+        <StockIdentity row={row} onPreview={onPreview} />
+      </div>
+    </td>
+  )
 }
 
 export function PositionTable({ rows, onPreview }: { rows: Position[]; onPreview?: (symbol: string, name: string) => void }) {
@@ -79,9 +90,9 @@ export function PositionTable({ rows, onPreview }: { rows: Position[]; onPreview
         {['交易者', '股票', '开仓日', '数量', '成本价', '成本金额', '最近价', '市值', '浮动盈亏', '收益率'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.position_key} className="hover:bg-elevated/30">
+        <tr key={row.position_key} className="group hover:bg-elevated/30">
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
+          <StockColumn row={row} onPreview={onPreview} />
           <td className={td}>{row.open_date}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
           <td className={`${td} font-mono`}>{money(row.cost, 4)}</td>
@@ -103,9 +114,9 @@ export function HistoryTable({ rows, onPreview }: { rows: HistoryRow[]; onPrevie
         {['交易者', '股票', '买入日期', '卖出日期', '数量', '成本金额', '净回收', '已实现盈亏', '收益率', '持有天数'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.history_id} className="hover:bg-elevated/30">
+        <tr key={row.history_id} className="group hover:bg-elevated/30">
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
+          <StockColumn row={row} onPreview={onPreview} />
           <td className={td}>{row.open_date}</td>
           <td className={td}>{row.close_date}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
@@ -127,10 +138,10 @@ export function RecordTable({ rows, onEdit, onDelete, onPreview }: { rows: Trade
         {['日期 / 时间', '交易者', '股票', '方向', '价格', '数量', '费用 / 税费', '备注', '操作'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.id} className="hover:bg-elevated/30">
+        <tr key={row.id} className="group hover:bg-elevated/30">
           <td className={td}>{row.trade_date}<span className="ml-1 text-muted">{row.trade_time ?? ''}</span></td>
           <td className={td}>{traderLabel(row.trader)}</td>
-          <td className={td}><StockIdentity row={row} onPreview={onPreview} /></td>
+          <StockColumn row={row} onPreview={onPreview} />
           <td className={td}><span className={row.side === 'buy' ? 'text-bull' : 'text-bear'}>{row.side === 'buy' ? '买入' : '卖出'}</span></td>
           <td className={`${td} font-mono`}>{money(row.price, 4)}</td>
           <td className={`${td} font-mono`}>{row.quantity.toLocaleString('zh-CN')}</td>
