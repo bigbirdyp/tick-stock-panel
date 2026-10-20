@@ -121,6 +121,29 @@ export function createDailyQuoteFallback({
   const limit = resolveConcurrency(concurrency);
   const cache = new Map();
   const inflight = new Map();
+  // GETs share these slots across every fallback() call on this instance.
+  // A waiter has not started timeoutMs yet. Cache and inflight never take a slot.
+  let activeSlots = 0;
+  const slotWaiters = [];
+
+  function acquireSlot() {
+    if (activeSlots < limit) {
+      activeSlots += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      slotWaiters.push(resolve);
+    });
+  }
+
+  function releaseSlot() {
+    const startNext = slotWaiters.shift();
+    if (startNext) {
+      startNext();
+      return;
+    }
+    activeSlots -= 1;
+  }
 
   function pruneCache(at) {
     for (const [key, entry] of cache) {
@@ -143,6 +166,7 @@ export function createDailyQuoteFallback({
   }
 
   async function requestOne(symbol, asOf) {
+    await acquireSlot();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const params = new URLSearchParams({
@@ -197,6 +221,7 @@ export function createDailyQuoteFallback({
       return { cacheable: false, quote: null };
     } finally {
       clearTimeout(timer);
+      releaseSlot();
     }
   }
 
