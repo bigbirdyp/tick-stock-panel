@@ -130,6 +130,8 @@ export function createDailyQuoteProvider({
 
       if (!response || response.ok !== true) {
         logFailure(logger, 'http', response ? response.status : null, unique.length);
+        // Drop the unread error body before finally clears the deadline timer.
+        if (response) controller.abort();
         return { cacheable: false, quotes: new Map() };
       }
 
