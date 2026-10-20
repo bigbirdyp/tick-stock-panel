@@ -13,11 +13,11 @@ import { recordInput } from '../src/validation.js';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 
-async function harness(t, initialState) {
+async function harness(t, initialState, quoteProvider = async () => new Map()) {
   const directory = mkdtempSync(join(tmpdir(), 'trade-journal-test-'));
   const filePath = join(directory, 'journal.json');
   if (initialState !== undefined) writeFileSync(filePath, JSON.stringify(initialState));
-  const store = new JournalStore(filePath, { quoteProvider: async () => new Map() });
+  const store = new JournalStore(filePath, { quoteProvider });
   const server = createApp(store);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -998,4 +998,126 @@ test('review traders allow the same date, reject patch conflicts, filter before 
     { trader: '验收乙', record_count: 0, review_count: 1 },
   ]);
   assert.equal((await request('GET', `/api/records/${record.body.data.id}`)).body.data.trader, '杨鹏');
+});
+
+test('current quotes every open symbol once, then pages by exact market value', async (t) => {
+  const calls = [];
+  const quotes = new Map([
+    ['600519.SH', { price: '12', price_as_of: '2026-10-20', price_status: 'fresh' }],
+    ['000001.SZ', { price: '6', price_as_of: '2026-10-17', price_status: 'stale' }],
+  ]);
+  const { request } = await harness(t, undefined, async (symbols, asOf) => {
+    calls.push({ symbols: [...symbols], asOf });
+    return quotes;
+  });
+  const buy = (overrides) => request('POST', '/api/records', trade({
+    trade_date: '2026-10-10', fee: 0, tax: 0, ...overrides,
+  }));
+  assert.equal((await buy({ trader: '甲', code: '600519', name: '贵州茅台', price: 10, quantity: 100 })).status, 201);
+  assert.equal((await buy({ trader: '乙', code: '600519', name: '贵州茅台', price: 20, quantity: 10 })).status, 201);
+  assert.equal((await buy({ trader: '甲', code: '000001', name: '平安银行', price: 5, quantity: 100 })).status, 201);
+  assert.equal((await buy({ trader: '甲', code: '300750', name: '宁德时代', price: 100, quantity: 10 })).status, 201);
+  assert.equal((await request('POST', '/api/records', trade({
+    trader: '甲', trade_date: '2026-10-11', code: '300750', name: '宁德时代', side: 'sell', price: 110, quantity: 10, fee: 0, tax: 0,
+  }))).status, 201);
+
+  const first = await request('GET', '/api/positions/current?as_of=2026-10-20&sort=market_value_desc&limit=1&offset=0');
+  assert.equal(first.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].asOf, '2026-10-20');
+  assert.deepEqual(calls[0].symbols, ['600519.SH', '000001.SZ']);
+  assert.equal(first.body.data.pagination.total, 3);
+  assert.equal(first.body.data.pagination.has_more, true);
+  assert.equal(first.body.data.positions.length, 1);
+  const top = first.body.data.positions[0];
+  assert.equal(top.trader, '甲');
+  assert.equal(top.symbol, '600519.SH');
+  assert.equal(top.quantity, 100);
+  assert.equal(top.cost, 10);
+  assert.equal(top.cost_amount, 1000);
+  assert.equal(top.current_price, 12);
+  assert.equal(top.price_source, 'tsp_kline_daily');
+  assert.equal(top.price_as_of, '2026-10-20');
+  assert.equal(top.price_status, 'fresh');
+  assert.equal(top.market_value, 1200);
+  assert.equal(top.unrealized_pnl, 200);
+  assert.equal(top.return_rate, 0.2);
+
+  const second = await request('GET', '/api/positions/current?as_of=2026-10-20&sort=market_value_desc&limit=1&offset=1');
+  assert.equal(second.status, 200);
+  const stale = second.body.data.positions[0];
+  assert.equal(stale.symbol, '000001.SZ');
+  assert.equal(stale.quantity, 100);
+  assert.equal(stale.cost, 5);
+  assert.equal(stale.cost_amount, 500);
+  assert.equal(stale.current_price, 6);
+  assert.equal(stale.price_source, 'tsp_kline_daily');
+  assert.equal(stale.price_as_of, '2026-10-17');
+  assert.equal(stale.price_status, 'stale');
+  assert.equal(stale.market_value, 600);
+  assert.equal(stale.unrealized_pnl, 100);
+  assert.equal(stale.return_rate, 0.2);
+
+  const third = await request('GET', '/api/positions/current?as_of=2026-10-20&sort=market_value_desc&limit=1&offset=2');
+  const otherCost = third.body.data.positions[0];
+  assert.equal(otherCost.trader, '乙');
+  assert.equal(otherCost.symbol, '600519.SH');
+  assert.equal(otherCost.quantity, 10);
+  assert.equal(otherCost.cost, 20);
+  assert.equal(otherCost.cost_amount, 200);
+  assert.equal(otherCost.current_price, 12);
+  assert.equal(otherCost.price_source, 'tsp_kline_daily');
+  assert.equal(otherCost.price_as_of, '2026-10-20');
+  assert.equal(otherCost.price_status, 'fresh');
+  assert.equal(otherCost.market_value, 120);
+  assert.equal(otherCost.unrealized_pnl, -80);
+  assert.equal(otherCost.return_rate, -0.4);
+  assert.deepEqual(calls.map((call) => ({ symbols: call.symbols, asOf: call.asOf })), [
+    { symbols: ['600519.SH', '000001.SZ'], asOf: '2026-10-20' },
+    { symbols: ['600519.SH', '000001.SZ'], asOf: '2026-10-20' },
+    { symbols: ['600519.SH', '000001.SZ'], asOf: '2026-10-20' },
+  ]);
+});
+
+test('a rejected quote provider leaves prices unavailable and history does not fetch', async (t) => {
+  let quoteCalls = 0;
+  const { request } = await harness(t, undefined, async () => {
+    quoteCalls += 1;
+    throw new Error('quotes unavailable');
+  });
+  assert.equal((await request('POST', '/api/records', trade({
+    trader: '甲', trade_date: '2026-10-18', code: '600519', name: '贵州茅台', price: 10, quantity: 100, fee: 0, tax: 0,
+  }))).status, 201);
+  assert.equal((await request('POST', '/api/records', trade({
+    trader: '甲', trade_date: '2026-10-18', code: '000001', name: '平安银行', price: 10, quantity: 100, fee: 0, tax: 0,
+  }))).status, 201);
+  assert.equal((await request('POST', '/api/records', trade({
+    trader: '甲', trade_date: '2026-10-19', code: '000001', name: '平安银行', side: 'sell', price: 11, quantity: 100, fee: 0, tax: 0,
+  }))).status, 201);
+
+  const history = await request('GET', '/api/positions/history');
+  assert.equal(history.status, 200);
+  assert.equal(quoteCalls, 0);
+  assert.equal(history.body.data.pagination.total, 1);
+  assert.equal(history.body.data.history[0].quantity, 100);
+  assert.equal(history.body.data.history[0].cost_amount, 1000);
+  assert.equal(history.body.data.history[0].realized_pnl, 100);
+  assert.equal(history.body.data.history[0].return_rate, 0.1);
+
+  const current = await request('GET', '/api/positions/current?as_of=2026-10-20&sort=market_value_desc&limit=1&offset=0');
+  assert.equal(current.status, 200);
+  assert.equal(quoteCalls, 1);
+  assert.equal(current.body.data.pagination.total, 1);
+  const row = current.body.data.positions[0];
+  assert.equal(row.symbol, '600519.SH');
+  assert.equal(row.quantity, 100);
+  assert.equal(row.cost, 10);
+  assert.equal(row.cost_amount, 1000);
+  assert.equal(row.current_price, null);
+  assert.equal(row.price_source, null);
+  assert.equal(row.price_as_of, null);
+  assert.equal(row.price_status, 'unavailable');
+  assert.equal(row.market_value, null);
+  assert.equal(row.unrealized_pnl, null);
+  assert.equal(row.return_rate, null);
 });
