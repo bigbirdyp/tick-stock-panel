@@ -378,3 +378,104 @@ test('one failed GET drops only that symbol and the next call retries it', async
     price_status: 'fresh',
   });
 });
+
+test('a changed position set does not renew an older quote through the batch cache', async () => {
+  const A = '000001.SZ';
+  const B = '600519.SH';
+  let nowMs = 0;
+  const posts = [];
+  const gets = [];
+  const qfqClose = { [A]: '9.01', [B]: '19.01' };
+  const raws = { [A]: ['10', '11'], [B]: ['20', '21'] };
+  const used = { [A]: 0, [B]: 0 };
+  const provider = createDailyQuoteProvider({
+    baseUrl: 'http://market.example',
+    now: () => nowMs,
+    fetchImpl(url, init) {
+      if (init.method === 'POST') {
+        const body = JSON.parse(init.body);
+        posts.push({ url, status: 200, symbols: body.symbols });
+        const data = {};
+        for (const symbol of body.symbols) {
+          data[symbol] = [{ date: AS_OF, close: qfqClose[symbol] }];
+        }
+        return {
+          ok: true,
+          status: 200,
+          json() {
+            return { data };
+          },
+        };
+      }
+      const symbol = new URL(url).searchParams.get('symbol');
+      const raw = raws[symbol][used[symbol]];
+      used[symbol] += 1;
+      gets.push({ url, status: 200, symbol, raw });
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          return {
+            symbol,
+            rows: [{ date: AS_OF, raw_close: raw, close: qfqClose[symbol] }],
+          };
+        },
+      };
+    },
+  });
+
+  const quote = (price) => ({
+    price,
+    price_as_of: AS_OF,
+    price_status: 'fresh',
+  });
+  const getUrl = (symbol) => (
+    `http://market.example/api/kline/daily?symbol=${symbol}&end_date=${AS_OF}&days=120`
+  );
+
+  const alone = await provider([A], AS_OF);
+  assert.deepEqual(posts, [{
+    url: 'http://market.example/api/kline/daily-batch',
+    status: 200,
+    symbols: [A],
+  }]);
+  assert.deepEqual(gets, [{ url: getUrl(A), status: 200, symbol: A, raw: '10' }]);
+  assert.equal(alone.size, 1);
+  assert.deepEqual(alone.get(A), quote('10'));
+  assert.notEqual(alone.get(A).price, qfqClose[A]);
+
+  nowMs = 59000;
+  const widened = await provider([A, B], AS_OF);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts[1], {
+    url: 'http://market.example/api/kline/daily-batch',
+    status: 200,
+    symbols: [A, B],
+  });
+  assert.deepEqual(gets, [
+    { url: getUrl(A), status: 200, symbol: A, raw: '10' },
+    { url: getUrl(B), status: 200, symbol: B, raw: '20' },
+  ]);
+  assert.deepEqual(widened.get(A), quote('10'));
+  assert.deepEqual(widened.get(B), quote('20'));
+  assert.notEqual(widened.get(B).price, qfqClose[B]);
+
+  nowMs = 59999;
+  const held = await provider([A, B], AS_OF);
+  assert.equal(posts.length, 2);
+  assert.equal(gets.length, 2);
+  assert.deepEqual(held.get(A), quote('10'));
+  assert.deepEqual(held.get(B), quote('20'));
+
+  nowMs = 60000;
+  const refreshed = await provider([A, B], AS_OF);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(gets, [
+    { url: getUrl(A), status: 200, symbol: A, raw: '10' },
+    { url: getUrl(B), status: 200, symbol: B, raw: '20' },
+    { url: getUrl(A), status: 200, symbol: A, raw: '11' },
+  ]);
+  assert.equal(gets.filter((call) => call.symbol === B).length, 1);
+  assert.deepEqual(refreshed.get(A), quote('11'));
+  assert.deepEqual(refreshed.get(B), quote('20'));
+});
