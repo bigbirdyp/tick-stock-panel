@@ -167,6 +167,14 @@ export function StockDailyKChart({
     ...(markers ?? []),
     ...(showLimitMarkers ? limitMarkers : []),
   ], [limitMarkers, markers, showLimitMarkers])
+  // 「异动」只收起涨跌停/炸板和没有逐笔的旧标记。非空 trades 的成交继续传给图表；
+  // 无成交时仍走原来的 showMarkers 总开关，避免 ECharts 把成交一起藏掉。
+  const chartMarkers = useMemo(() => {
+    if (showMarkers) return allMarkers
+    const filled = allMarkers.filter(marker => (marker.trades?.length ?? 0) > 0)
+    return filled.length > 0 ? filled : allMarkers
+  }, [allMarkers, showMarkers])
+  const chartShowMarkers = showMarkers || chartMarkers.some(marker => (marker.trades?.length ?? 0) > 0)
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -274,13 +282,13 @@ export function StockDailyKChart({
       {rows.length > 0 && (
         <EChartsCandlestick
           data={rows}
-          markers={allMarkers}
+          markers={chartMarkers}
           ranges={ranges}
           priceLines={priceLines}
           height={chartHeight - 22}
           showMA={showMA}
           showInfoBar={showInfoBar}
-          showMarkers={showMarkers}
+          showMarkers={chartShowMarkers}
           stockInfo={stockInfo}
           symbol={symbol}
           linkedPrice={linkedPrice}
