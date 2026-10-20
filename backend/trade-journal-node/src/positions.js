@@ -101,13 +101,43 @@ export function derive(records) {
   return { bySymbol, history };
 }
 
-export function currentPositions(records) {
+const unavailablePrice = {
+  current_price: null,
+  price_source: null,
+  price_as_of: null,
+  price_status: 'unavailable',
+  market_value: null,
+  unrealized_pnl: null,
+  return_rate: null,
+};
+
+// quotes is an optional Map keyed by symbol. Each value is an already validated
+// { price, price_as_of, price_status } record. Missing quotes stay unavailable.
+export function currentPositions(records, quotes) {
   const { bySymbol } = derive(records);
   const positions = [];
   for (const state of bySymbol.values()) {
     if (state.lots.length === 0) continue;
     const quantity = state.lots.reduce((total, lot) => total + lot.quantity, 0);
     const costAmount = state.lots.reduce((total, lot) => total + lot.costAmount, 0n);
+    const quote = quotes?.get(state.symbol);
+    let price = unavailablePrice;
+    if (quote) {
+      const priceUnits = decimalUnits(quote.price);
+      const marketValue = priceUnits * BigInt(quantity);
+      // Stay on the exact 1e-8 costAmount. Rounding both sides to cents first
+      // turns a 0.009 gain (10.014 - 10.005) into 10.01 - 10.01 = 0.
+      const unrealized = marketValue - costAmount;
+      price = {
+        current_price: roundedNumber(priceUnits, 4),
+        price_source: 'tsp_kline_daily',
+        price_as_of: quote.price_as_of,
+        price_status: quote.price_status,
+        market_value: roundedNumber(marketValue, 2),
+        unrealized_pnl: roundedNumber(unrealized, 2),
+        return_rate: ratio(unrealized, costAmount),
+      };
+    }
     positions.push({
       position_key: `${state.trader}\u001f${state.symbol}`,
       trader: state.trader,
@@ -118,13 +148,7 @@ export function currentPositions(records) {
       quantity,
       cost: averagePrice(costAmount, quantity),
       cost_amount: roundedNumber(costAmount, 2),
-      current_price: null,
-      price_source: null,
-      price_as_of: null,
-      price_status: 'unavailable',
-      market_value: null,
-      unrealized_pnl: null,
-      return_rate: null,
+      ...price,
     });
   }
   return positions;
