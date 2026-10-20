@@ -1004,7 +1004,7 @@ test('current quotes every open symbol once, then pages by exact market value', 
   const calls = [];
   const quotes = new Map([
     ['600519.SH', { price: '12', price_as_of: '2026-10-20', price_status: 'fresh' }],
-    ['000001.SZ', { price: '6', price_as_of: '2026-10-17', price_status: 'stale' }],
+    ['000001.SZ', { price: '6', price_as_of: '2026-10-16', price_status: 'stale' }],
   ]);
   const { request } = await harness(t, undefined, async (symbols, asOf) => {
     calls.push({ symbols: [...symbols], asOf });
@@ -1052,7 +1052,7 @@ test('current quotes every open symbol once, then pages by exact market value', 
   assert.equal(stale.cost_amount, 500);
   assert.equal(stale.current_price, 6);
   assert.equal(stale.price_source, 'tsp_kline_daily');
-  assert.equal(stale.price_as_of, '2026-10-17');
+  assert.equal(stale.price_as_of, '2026-10-16');
   assert.equal(stale.price_status, 'stale');
   assert.equal(stale.market_value, 600);
   assert.equal(stale.unrealized_pnl, 100);

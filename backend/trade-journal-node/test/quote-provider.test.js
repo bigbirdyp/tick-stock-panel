@@ -111,7 +111,7 @@ test('one successful POST is deduped and cached until 60s', async () => {
         { date: AS_OF, raw_close: '12.34', close: '11.11' },
       ],
       '600519.SH': [
-        { date: '2026-10-17', raw_close: '1680.5', close: '1500' },
+        { date: '2026-10-16', raw_close: '1680.5', close: '1500' },
       ],
     },
   };
@@ -148,7 +148,7 @@ test('one successful POST is deduped and cached until 60s', async () => {
   });
   assert.deepEqual(first.get('600519.SH'), {
     price: '1680.5',
-    price_as_of: '2026-10-17',
+    price_as_of: '2026-10-16',
     price_status: 'stale',
   });
 
@@ -185,7 +185,7 @@ test('a different asOf refetches and concurrent callers share one POST', async (
       '000001.SZ': [
         { date: '2026-10-21', raw_close: '99.9', close: '80' },
         { date: AS_OF, raw_close: '12.34', close: '11.11' },
-        { date: '2026-10-17', raw_close: '10.5', close: '9.9' },
+        { date: '2026-10-16', raw_close: '10.5', close: '9.9' },
       ],
     },
   };
@@ -225,7 +225,7 @@ test('a different asOf refetches and concurrent callers share one POST', async (
   assert.equal(past.size, 1);
   assert.deepEqual(past.get('000001.SZ'), {
     price: '10.5',
-    price_as_of: '2026-10-17',
+    price_as_of: '2026-10-16',
     price_status: 'stale',
   });
 });
