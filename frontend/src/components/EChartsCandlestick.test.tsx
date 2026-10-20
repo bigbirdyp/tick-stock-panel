@@ -552,3 +552,54 @@ it('同步可见窗口不会反复重建图表', async () => {
   expect(chart.setOption.mock.calls.length).toBe(afterMount)
   expect(outsideNotice()).toBeNull()
 })
+
+it('页面缩放时成交标记悬停按容器比例归一化，切到无逐笔后不再改写同一事件', async () => {
+  type ZoomMouseEvent = MouseEvent & { zrX?: number; zrY?: number }
+
+  await renderChart('600000', [tradeMarker(DAYS[10], [{
+    date: DAYS[10], side: 'buy', price: 10, quantity: 100, trader: '甲',
+  }])])
+
+  // showInfoBar=false 时，host 的第一层子节点的第一层子节点就是图表容器
+  const container = host.firstElementChild!.firstElementChild!
+  const canvas = container.appendChild(document.createElement('canvas'))
+  Object.defineProperties(canvas, {
+    clientWidth: { value: 600 },
+    clientHeight: { value: 400 },
+  })
+  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+    left: 100,
+    top: 200,
+    width: 540,
+    height: 360,
+    right: 640,
+    bottom: 560,
+    x: 100,
+    y: 200,
+    toJSON() {},
+  } as DOMRect)
+
+  const native = new MouseEvent('mousemove', {
+    bubbles: true,
+    clientX: 370,
+    clientY: 380,
+  }) as ZoomMouseEvent
+  Object.defineProperty(native, 'offsetX', { value: 270 })
+  Object.defineProperty(native, 'offsetY', { value: 180 })
+
+  const listener = vi.fn((event: ZoomMouseEvent) => [event.zrX, event.zrY])
+  canvas.addEventListener('mousemove', listener)
+  canvas.dispatchEvent(native)
+
+  expect(listener.mock.calls[0]?.[0]).toBe(native)
+  expect(listener.mock.results[0]?.value).toEqual([300, 200])
+  expect([native.offsetX, native.offsetY]).toEqual([270, 180])
+
+  await renderChart('600000', [tradeMarker(DAYS[10], [])])
+  delete native.zrX
+  delete native.zrY
+  canvas.dispatchEvent(native)
+
+  expect(listener.mock.calls.at(-1)?.[0]).toBe(native)
+  expect(listener.mock.results.at(-1)?.value).toEqual([undefined, undefined])
+})
