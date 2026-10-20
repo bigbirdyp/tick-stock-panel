@@ -1,5 +1,11 @@
-// One POST /api/kline/daily-batch. Success-only memory cache.
-// No fallback GET, no store.
+// One POST /api/kline/daily-batch, then GET /api/kline/daily only for symbols
+// the batch selected no quote for. Not done: a newer <= asOf bar with no
+// raw_close is still covered here by an older raw_close. qfq `close` is never
+// a raw price. This cache stores a fully cacheable merged result. GET hits also
+// stay in the fallback cache for 60s. Any non-cacheable GET is not stored here,
+// so a later call can recover that symbol without dropping the others.
+// No store.
+import { createDailyQuoteFallback } from './daily-quote-fallback.js';
 import { selectDailyQuote } from './daily-quotes.js';
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -82,6 +88,13 @@ export function createDailyQuoteProvider({
   const endpoint = `${root}/api/kline/daily-batch`;
   const cache = new Map();
   const inflight = new Map();
+  const fallbackDailyQuotes = createDailyQuoteFallback({
+    baseUrl: root,
+    fetchImpl,
+    logger,
+    timeoutMs,
+    now,
+  });
 
   function pruneCache(at) {
     for (const [key, entry] of cache) {
@@ -150,12 +163,35 @@ export function createDailyQuoteProvider({
         return { cacheable: false, quotes: new Map() };
       }
 
-      const quotes = new Map();
+      const selected = new Map();
       for (const symbol of unique) {
         const quote = selectDailyQuote(data[symbol], asOf);
-        if (quote) quotes.set(symbol, quote);
+        if (quote) selected.set(symbol, quote);
       }
-      return { cacheable: true, quotes };
+
+      // Basic path only. Fallback runs for symbols selectDailyQuote dropped
+      // entirely. Not done: if a newer <= asOf bar has no raw_close and an
+      // older bar still has raw_close, this keeps the older quote and does
+      // not GET. Date and raw_close checks stay inside selectDailyQuote.
+      const missing = [];
+      for (const symbol of unique) {
+        if (!selected.has(symbol)) missing.push(symbol);
+      }
+      if (missing.length === 0) return { cacheable: true, quotes: selected };
+
+      const outcomes = await fallbackDailyQuotes(missing, asOf);
+      const quotes = new Map();
+      let cacheable = true;
+      for (const symbol of unique) {
+        if (selected.has(symbol)) {
+          quotes.set(symbol, selected.get(symbol));
+          continue;
+        }
+        const outcome = outcomes.get(symbol);
+        if (!outcome || outcome.cacheable !== true) cacheable = false;
+        if (outcome && outcome.quote) quotes.set(symbol, outcome.quote);
+      }
+      return { cacheable, quotes };
     } finally {
       clearTimeout(timer);
     }
