@@ -28,6 +28,18 @@ export interface OHLC {
   boll_lower?: number | null
 }
 
+/**
+ * 图表上的一笔成交。只保留画标记和提示需要的字段，
+ * 不引用交易日记的完整记录，其它页面的标记可以不带 trades。
+ */
+export interface ChartTradeDetail {
+  date: string
+  side: 'buy' | 'sell'
+  price: number
+  quantity: number
+  trader: string
+}
+
 export interface ChartMarker {
   date: string
   kind: 'buy' | 'sell' | 'neutral'
@@ -36,6 +48,8 @@ export interface ChartMarker {
   above?: boolean
   /** 自定义标签颜色，覆盖默认的 kind 对应色。 */
   color?: string
+  /** 这一天的原始逐笔。同一天只有一个标记；没有逐笔的标记不带此字段。 */
+  trades?: readonly ChartTradeDetail[]
 }
 
 export interface ChartRange {

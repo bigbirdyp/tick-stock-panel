@@ -84,16 +84,29 @@ async function openPreview(container: HTMLElement, label: string) {
   return previewDialog(container)!
 }
 
-it('全部交易员打开详情不读取成交，详情也收不到标记', async () => {
+it('全部交易员打开详情会读取该股成交且不传 trader，关闭后不再请求', async () => {
   const listRecords = vi.spyOn(journal, 'listRecords')
   const container = await renderPage()
   await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
   const dialog = await openPreview(container, '查看 贵州茅台 详情')
-  expect(dialog.getAttribute('data-markers')).toBe('')
-  expect(listRecords).not.toHaveBeenCalled()
+  await vi.waitFor(() => expect(dialog.getAttribute('data-markers')).toContain('"trader":"AI选股:atr_pct"'))
+  const markers = JSON.parse(dialog.getAttribute('data-markers') ?? 'null') as { kind: string; label: string; trades: { price: number; quantity: number; trader: string }[] }[]
+  expect(markers).toEqual([{
+    date: '2026-10-12',
+    kind: 'buy',
+    label: '买',
+    trades: [{ date: '2026-10-12', side: 'buy', price: 1688.5, quantity: 100, trader: 'AI选股:atr_pct' }],
+  }])
+  expect(listRecords).toHaveBeenCalledWith({ code: '600519', limit: 200, offset: 0, sort: 'trade_date_asc' })
+  expect(listRecords.mock.calls.every(([query]) => query?.trader == null)).toBe(true)
+  const calls = listRecords.mock.calls.length
+  await act(async () => dialog.querySelector('button')?.click())
+  expect(previewDialog(container)).toBeNull()
+  await act(async () => { await Promise.resolve() })
+  expect(listRecords.mock.calls.length).toBe(calls)
 })
 
-it('选定交易员后把该股成交标记交给详情，换股票或交易员不沿用上一套', async () => {
+it('选定交易员后把该股逐笔标记交给详情，换股票或交易员不沿用上一套', async () => {
   const listRecords = vi.spyOn(journal, 'listRecords')
   const container = await renderPage()
   await vi.waitFor(() => {
@@ -104,8 +117,11 @@ it('选定交易员后把该股成交标记交给详情，换股票或交易员�
   await clickColumn(container, '历史收益')
   await vi.waitFor(() => expect(container.textContent).toContain('平安银行'))
   const pingan = await openPreview(container, '查看 平安银行 详情')
-  await vi.waitFor(() => expect(pingan.getAttribute('data-markers')).toContain('买 10.80 ×1000'))
-  expect(pingan.getAttribute('data-markers')).toContain('卖 11.26 ×1000')
+  await vi.waitFor(() => expect(pingan.getAttribute('data-markers')).toContain('"price":10.8'))
+  const pinganMarkers = JSON.parse(pingan.getAttribute('data-markers') ?? 'null') as { label: string; trades: { quantity: number; side: string }[] }[]
+  expect(pinganMarkers.map(marker => marker.label)).toEqual(['买', '卖'])
+  expect(pinganMarkers[0]?.trades.map(trade => trade.quantity)).toEqual([600, 400])
+  expect(pinganMarkers[1]?.trades).toEqual([expect.objectContaining({ side: 'sell', price: 11.26, quantity: 1000, trader: '杨鹏' })])
   expect(listRecords).toHaveBeenCalledWith(expect.objectContaining({
     trader: '杨鹏', code: '000001', limit: 200, offset: 0, sort: 'trade_date_asc',
   }))
@@ -113,15 +129,16 @@ it('选定交易员后把该股成交标记交给详情，换股票或交易员�
   await clickTrader(container, 'AI选股:atr_pct')
   await vi.waitFor(() => {
     const raw = previewDialog(container)?.getAttribute('data-markers') ?? ''
-    expect(raw).not.toContain('10.80')
+    expect(raw).not.toContain('10.8')
   })
   await vi.waitFor(() => expect(previewDialog(container)?.getAttribute('data-markers')).toBe('[]'))
 
   await clickColumn(container, '当前持仓')
   await vi.waitFor(() => expect(container.querySelector('[aria-label="查看 贵州茅台 详情"]')).not.toBeNull())
   const maotai = await openPreview(container, '查看 贵州茅台 详情')
-  await vi.waitFor(() => expect(maotai.getAttribute('data-markers')).toContain('买 1688.50 ×100'))
-  expect(maotai.getAttribute('data-markers')).not.toContain('10.80')
+  await vi.waitFor(() => expect(maotai.getAttribute('data-markers')).toContain('"price":1688.5'))
+  expect(maotai.getAttribute('data-markers')).not.toContain('10.8')
+  expect(maotai.getAttribute('data-markers')).toContain('"label":"买"')
   expect(listRecords).toHaveBeenCalledWith(expect.objectContaining({
     trader: 'AI选股:atr_pct', code: '600519', limit: 200, offset: 0, sort: 'trade_date_asc',
   }))
@@ -129,6 +146,38 @@ it('选定交易员后把该股成交标记交给详情，换股票或交易员�
     expect(query?.trader).toBeTruthy()
     expect(query?.code).toMatch(/^[0-9]{6}$/)
   }
+})
+
+it('切换交易员或股票时，新结果返回前不留下上一套标记', async () => {
+  const real = journal.listRecords.bind(journal)
+  const held: { query: Parameters<typeof real>[0]; finish: (value: Awaited<ReturnType<typeof real>>) => void }[] = []
+  vi.spyOn(journal, 'listRecords').mockImplementation(query => {
+    const hold = query.trader === 'AI选股:atr_pct' && (query.code === '000001' || query.code === '600519')
+    if (!hold) return real(query)
+    return new Promise(resolve => { held.push({ query, finish: resolve }) })
+  })
+  const container = await renderPage()
+  await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
+  await clickTrader(container, '杨鹏')
+  await clickColumn(container, '历史收益')
+  await vi.waitFor(() => expect(container.textContent).toContain('平安银行'))
+  const pingan = await openPreview(container, '查看 平安银行 详情')
+  await vi.waitFor(() => expect(pingan.getAttribute('data-markers')).toContain('"price":10.8'))
+
+  await clickTrader(container, 'AI选股:atr_pct')
+  expect(previewDialog(container)?.getAttribute('data-markers')).toBe('')
+  expect(held).toHaveLength(1)
+  held[0]?.finish(await real(held[0].query))
+  await vi.waitFor(() => expect(previewDialog(container)?.getAttribute('data-markers')).toBe('[]'))
+
+  await clickColumn(container, '当前持仓')
+  await vi.waitFor(() => expect(container.querySelector('[aria-label="查看 贵州茅台 详情"]')).not.toBeNull())
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="查看 贵州茅台 详情"]')?.click())
+  expect(previewDialog(container)?.getAttribute('data-markers')).toBe('')
+  expect(held).toHaveLength(2)
+  held[1]?.finish(await real(held[1].query))
+  await vi.waitFor(() => expect(previewDialog(container)?.getAttribute('data-markers')).toContain('"price":1688.5'))
+  expect(previewDialog(container)?.getAttribute('data-markers')).not.toContain('10.8')
 })
 
 it('成交标记读取失败时详情仍在，且不把标记说成没有成交', async () => {
