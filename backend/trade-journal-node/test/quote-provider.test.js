@@ -367,7 +367,7 @@ test('one failed GET drops only that symbol and the next call retries it', async
   });
 
   const second = await provider(symbols, AS_OF);
-  assert.equal(posts, 2);
+  assert.equal(posts, 1);
   assert.deepEqual(gets, ['000001.SZ', '000002.SZ', '000002.SZ']);
   assert.equal(second.size, 3);
   assert.deepEqual(second.get('600000.SH'), first.get('600000.SH'));

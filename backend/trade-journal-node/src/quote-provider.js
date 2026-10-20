@@ -2,10 +2,12 @@
 // the batch left without a quote, and for every symbol whose selected raw is
 // older than a later real bar on or before asOf. Future bars are not that
 // date target. A failed GET leaves only that symbol unavailable and does not
-// keep the older raw. qfq `close` is never a raw price. This cache stores a
-// fully cacheable merged result. GET hits also stay in the fallback cache for
-// 60s. Any non-cacheable GET is not stored here, so a later call can recover
-// that symbol without dropping the others.
+// keep the older raw. qfq `close` is never a raw price. The outer cache and
+// inflight keep only the selected map from a successful POST. GET runs after
+// a cache hit, a shared inflight, or that POST, and the merged map is not
+// stored: a per-symbol fallback hit must not renew this group for another 60s.
+// A failed POST, timeout, JSON, or shape is an empty map and does not GET.
+// The fallback keeps its own 60s per-symbol cache.
 // No store.
 import { createDailyQuoteFallback } from './daily-quote-fallback.js';
 import { selectDailyQuote } from './daily-quotes.js';
@@ -189,37 +191,40 @@ export function createDailyQuoteProvider({
 
       // selectDailyQuote still chooses the raw price and its real date.
       // selected keeps only symbols that already cover the newest <= asOf bar.
-      // An older raw is a lookup, not a result: a failed GET must not put it back.
-      // Other symbols stay on their batch quotes.
+      // An older raw is not a result. Empty selected is still a successful POST.
       const selected = new Map();
-      const missing = [];
       for (const symbol of unique) {
         const rows = data[symbol];
         const quote = selectDailyQuote(rows, asOf);
-        if (!needsDailyLookup(rows, asOf, quote)) {
-          selected.set(symbol, quote);
-          continue;
-        }
-        missing.push(symbol);
+        if (!needsDailyLookup(rows, asOf, quote)) selected.set(symbol, quote);
       }
-      if (missing.length === 0) return { cacheable: true, quotes: selected };
-
-      const outcomes = await fallbackDailyQuotes(missing, asOf);
-      const quotes = new Map();
-      let cacheable = true;
-      for (const symbol of unique) {
-        if (selected.has(symbol)) {
-          quotes.set(symbol, selected.get(symbol));
-          continue;
-        }
-        const outcome = outcomes.get(symbol);
-        if (!outcome || outcome.cacheable !== true) cacheable = false;
-        if (outcome && outcome.quote) quotes.set(symbol, outcome.quote);
-      }
-      return { cacheable, quotes };
+      return { cacheable: true, quotes: selected };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // unique minus selected. The merged map stays out of the outer cache so a
+  // stale per-symbol fallback hit cannot extend this batch key by another 60s.
+  // A failed GET omits only that symbol; the next call can GET it again.
+  async function mergeDailyLookups(unique, asOf, selected) {
+    const missing = [];
+    for (const symbol of unique) {
+      if (!selected.has(symbol)) missing.push(symbol);
+    }
+    if (missing.length === 0) return copyQuotes(selected);
+
+    const outcomes = await fallbackDailyQuotes(missing, asOf);
+    const quotes = new Map();
+    for (const symbol of unique) {
+      if (selected.has(symbol)) {
+        quotes.set(symbol, selected.get(symbol));
+        continue;
+      }
+      const outcome = outcomes.get(symbol);
+      if (outcome && outcome.quote) quotes.set(symbol, outcome.quote);
+    }
+    return quotes;
   }
 
   return async function dailyQuotes(symbols, asOf) {
@@ -230,21 +235,31 @@ export function createDailyQuoteProvider({
 
     const key = quoteCacheKey(unique, asOf);
     pruneCache(now());
+
+    let batch;
     const hit = cache.get(key);
-    if (hit) return copyQuotes(hit.quotes);
-
-    const pending = inflight.get(key);
-    if (pending) return copyQuotes(await pending);
-
-    const job = requestDailyQuotes(unique, asOf).then((result) => {
-      if (!result.cacheable) return result.quotes;
-      return remember(key, result.quotes);
-    });
-    inflight.set(key, job);
-    try {
-      return copyQuotes(await job);
-    } finally {
-      inflight.delete(key);
+    if (hit) {
+      batch = { cacheable: true, quotes: hit.quotes };
+    } else {
+      const pending = inflight.get(key);
+      if (pending) {
+        batch = await pending;
+      } else {
+        const job = requestDailyQuotes(unique, asOf).then((result) => {
+          if (!result.cacheable) return result;
+          return { cacheable: true, quotes: remember(key, result.quotes) };
+        });
+        inflight.set(key, job);
+        try {
+          batch = await job;
+        } finally {
+          inflight.delete(key);
+        }
+      }
     }
+
+    // POST deadline is already cleared. Do not GET after a failed batch.
+    if (!batch.cacheable) return new Map();
+    return mergeDailyLookups(unique, asOf, batch.quotes);
   };
 }
