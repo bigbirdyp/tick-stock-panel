@@ -17,7 +17,7 @@ async function harness(t, initialState) {
   const directory = mkdtempSync(join(tmpdir(), 'trade-journal-test-'));
   const filePath = join(directory, 'journal.json');
   if (initialState !== undefined) writeFileSync(filePath, JSON.stringify(initialState));
-  const store = new JournalStore(filePath);
+  const store = new JournalStore(filePath, { quoteProvider: async () => new Map() });
   const server = createApp(store);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
@@ -483,7 +483,7 @@ test('journal listen port stays on the contract default when ambient PORT is tak
   assert.throws(() => journalPort({ TRADE_JOURNAL_PORT: '65536' }), /TRADE_JOURNAL_PORT/);
 });
 
-test('seed command is idempotent and produces current/history/review fixtures', () => {
+test('seed command is idempotent and produces current/history/review fixtures', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'trade-journal-seed-test-'));
   try {
     const filePath = join(directory, 'journal.json');
@@ -495,11 +495,12 @@ test('seed command is idempotent and produces current/history/review fixtures', 
       });
       assert.equal(run.status, 0, run.stderr);
     }
-    const store = new JournalStore(filePath);
+    const store = new JournalStore(filePath, { quoteProvider: async () => new Map() });
     assert.equal(store.state.records.length, 3);
     assert.equal(store.state.reviews.length, 1);
     assert.deepEqual(store.listTraders(), { traders: [{ trader: '示例', record_count: 3, review_count: 1 }] });
-    assert.equal(store.current({ as_of: '2025-01-08', limit: 50, offset: 0, sort: 'symbol_asc' }).positions[0].quantity, 50);
+    const current = await store.current({ as_of: '2025-01-08', limit: 50, offset: 0, sort: 'symbol_asc' });
+    assert.equal(current.positions[0].quantity, 50);
     assert.equal(store.history({ limit: 50, offset: 0, sort: 'close_date_desc' }).history.length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });

@@ -80,7 +80,7 @@ async function route(request, response, store) {
   }
 
   if (pathname === '/api/positions/current' && method === 'GET') {
-    return reply(response, 200, { data: store.current(listQuery(searchParams, 'current')) });
+    return reply(response, 200, { data: await store.current(listQuery(searchParams, 'current')) });
   }
   if (pathname === '/api/positions/history' && method === 'GET') {
     return reply(response, 200, { data: store.history(listQuery(searchParams, 'history')) });

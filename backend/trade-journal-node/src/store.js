@@ -3,6 +3,7 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { dirname } from 'node:path';
 import { ApiError } from './validation.js';
 import { currentPositions, derive, publicHistory, sortHistory, sortPositions, sortRecords, sortReviews } from './positions.js';
+import { createDailyQuoteProvider } from './quote-provider.js';
 
 const SCHEMA_VERSION = 3;
 const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
@@ -20,6 +21,25 @@ function shanghaiTimestamp(milliseconds) {
 
 export function todayShanghai() {
   return shanghaiTimestamp(Date.now()).slice(0, 10);
+}
+
+// reason/count only. Error text can carry the request URL or symbol book.
+function quoteFailureReason(error) {
+  if (!error || typeof error !== 'object') return 'provider';
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return 'timeout';
+  if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') return 'network';
+  return 'provider';
+}
+
+function openPositionSymbols(records) {
+  const symbols = [];
+  const seen = new Set();
+  for (const state of derive(records).bySymbol.values()) {
+    if (state.lots.length === 0 || seen.has(state.symbol)) continue;
+    seen.add(state.symbol);
+    symbols.push(state.symbol);
+  }
+  return symbols;
 }
 
 function page(items, { limit, offset }) {
@@ -174,8 +194,10 @@ function persist(filePath, state) {
 }
 
 export class JournalStore {
-  constructor(filePath) {
+  constructor(filePath, { quoteProvider = createDailyQuoteProvider() } = {}) {
     this.filePath = filePath;
+    // One provider per store. Construction does not fetch.
+    this.quoteProvider = quoteProvider;
     const loaded = existsSync(filePath) ? JSON.parse(readFileSync(filePath, 'utf8')) : emptyState();
     assertStateShape(loaded);
     const migrated = migrateState(loaded);
@@ -331,10 +353,24 @@ export class JournalStore {
     return { traders };
   }
 
-  current(query) {
+  async current(query) {
     const asOf = query.as_of ?? todayShanghai();
     const records = this.state.records.filter((record) => record.trade_date <= asOf);
-    const filtered = currentPositions(records).filter((position) =>
+    const symbols = openPositionSymbols(records);
+    let quotes = new Map();
+    if (symbols.length > 0) {
+      try {
+        quotes = await this.quoteProvider(symbols, asOf);
+      } catch (error) {
+        // Provider failures degrade to unavailable prices. Ledger errors throw above this call.
+        quotes = new Map();
+        console.warn('[trade-journal-node] quote provider failed', {
+          reason: quoteFailureReason(error),
+          count: symbols.length,
+        });
+      }
+    }
+    const filtered = currentPositions(records, quotes).filter((position) =>
       (!query.code || position.code === query.code) && sameTrader(position.trader, query.trader));
     const result = page(sortPositions(filtered, query.sort), query);
     return { as_of: asOf, positions: result.items, pagination: result.pagination };
