@@ -198,6 +198,16 @@ export function StockDailyKChart({
 
   if (!symbol) return null
 
+  // 只有这次查询已经成功、并且 rows 本身就是空数组，才算空K。
+  // 加载中、失败、还没有结果都不能当成空成功；有原始行但转完都无效仍走格式异常。
+  // 空K没有任何可见日期，笔数按当前 markers 各组 trades 逐笔相加，不按标记条数，也不另存状态。
+  const rawRows = kline.data?.rows
+  const emptyKline = !kline.isLoading && !kline.isError && Array.isArray(rawRows) && rawRows.length === 0
+  const outsideTradeCount = (markers ?? []).reduce(
+    (total, marker) => total + (marker.trades?.length ?? 0),
+    0,
+  )
+
   return (
     <div className={className} style={{ minHeight: chartHeight }}>
       {showIndicatorControls && rows.length > 0 && (
@@ -278,6 +288,10 @@ export function StockDailyKChart({
       {kline.isError && <div className="text-sm text-danger py-2">日K加载失败</div>}
       {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
         <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
+      )}
+      {emptyKline && <div className="text-sm text-muted py-2">暂无日K数据</div>}
+      {emptyKline && outsideTradeCount > 0 && (
+        <div className="text-sm text-muted py-2">有 {outsideTradeCount} 笔交易不在当前区间</div>
       )}
       {rows.length > 0 && (
         <EChartsCandlestick
