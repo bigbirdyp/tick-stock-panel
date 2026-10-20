@@ -77,6 +77,20 @@ function previewDialog(container: HTMLElement) {
   return container.querySelector<HTMLElement>('[role="dialog"][aria-label="股票详情"]')
 }
 
+function reviewArticle(container: HTMLElement, date: string) {
+  return Array.from(container.querySelectorAll('article')).find(article => article.querySelector('h3')?.textContent === date) ?? null
+}
+
+function prosePieces(article: Element | null) {
+  return Array.from(article?.querySelector('p')?.children ?? [])
+    .filter(el => el instanceof HTMLElement && el.querySelector('button') == null)
+    .map(el => el.textContent ?? '')
+}
+
+function cellParts(button: Element | null | undefined) {
+  return Array.from(button?.children ?? []).map(el => el.textContent)
+}
+
 async function openPreview(container: HTMLElement, label: string) {
   const button = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)
   expect(button, label).not.toBeNull()
@@ -118,7 +132,13 @@ it('直接进入每日复盘时，快照里的名称可点，关闭后地址、�
   expect(window.location.search).toBe(reviewSearch)
   expect(selectedTrader(container)).toBe('杨鹏')
   expect(selectedColumn(container)).toBe('每日复盘')
-  expect(container.textContent).toContain('今天关注贵州茅台')
+
+  const named = reviewArticle(container, '2026-10-18')
+  expect(prosePieces(named)).toEqual(['今天关注'])
+  expect(cellParts(named?.querySelector('[aria-label="查看 贵州茅台 详情"]'))).toEqual(['600519.SH', '贵州茅台'])
+  expect(named?.querySelector('p')?.textContent).toBe('今天关注600519.SH贵州茅台')
+  await act(async () => named?.querySelector<HTMLButtonElement>('[aria-label="编辑 杨鹏 2026-10-18 复盘"]')?.click())
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="复盘内容"]')?.value).toBe('今天关注贵州茅台')
 })
 
 it('行情目录失败时，复盘里的明确代码仍可点，纯名称保持原文', async () => {
@@ -134,5 +154,12 @@ it('行情目录失败时，复盘里的明确代码仍可点，纯名称保持�
   expect(window.location.search).toBe(reviewSearch)
   expect(selectedTrader(container)).toBe('杨鹏')
   expect(selectedColumn(container)).toBe('每日复盘')
-  expect(container.textContent).toContain('今天关注贵州茅台，代码600519')
+
+  const coded = reviewArticle(container, '2026-10-17')
+  expect(coded?.querySelector('[aria-label="查看 贵州茅台 详情"]')).toBeNull()
+  expect(prosePieces(coded)).toEqual(['今天关注贵州茅台，代码'])
+  expect(cellParts(coded?.querySelector('[aria-label="查看 600519.SH 详情"]'))).toEqual(['600519.SH'])
+  expect(coded?.querySelector('p')?.textContent).toBe('今天关注贵州茅台，代码600519.SH')
+  await act(async () => coded?.querySelector<HTMLButtonElement>('[aria-label="编辑 杨鹏 2026-10-17 复盘"]')?.click())
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="复盘内容"]')?.value).toBe('今天关注贵州茅台，代码600519')
 })

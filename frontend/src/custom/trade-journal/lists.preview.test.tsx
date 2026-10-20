@@ -122,7 +122,7 @@ function expectSharedStock(name: string, symbol: string, clickable: boolean) {
 
   const row = cell!.shell.closest('tr')
   expect(row?.className).toContain('group')
-  expect(row?.className).toContain('hover:bg-elevated/30')
+  expect(row?.className).toContain('hover:bg-elevated/50')
   const column = cell!.shell.closest('td')
   expect(column?.className).toContain('px-1.5')
   expect(column?.className).toContain('py-1.5')

@@ -57,7 +57,6 @@ const th = 'whitespace-nowrap border-b border-border bg-elevated/40 px-4 py-2 fo
 const td = 'whitespace-nowrap border-b border-border/50 px-4 py-3 text-secondary'
 // 股票列只改 padding，边框仍跟日志其它单元格走。不要加固定宽，窄屏靠表格横滑。
 const stockTd = 'whitespace-nowrap border-b border-border/50 px-1.5 py-1.5 text-secondary'
-const stockButtonClass = 'cursor-pointer rounded-sm underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent'
 
 type StockRow = { code: string; symbol: string; name: string }
 
@@ -90,7 +89,7 @@ export function PositionTable({ rows, onPreview }: { rows: Position[]; onPreview
         {['交易者', '股票', '开仓日', '数量', '成本价', '成本金额', '最近价', '市值', '浮动盈亏', '收益率'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.position_key} className="group hover:bg-elevated/30">
+        <tr key={row.position_key} className="group hover:bg-elevated/50">
           <td className={td}>{traderLabel(row.trader)}</td>
           <StockColumn row={row} onPreview={onPreview} />
           <td className={td}>{row.open_date}</td>
@@ -114,7 +113,7 @@ export function HistoryTable({ rows, onPreview }: { rows: HistoryRow[]; onPrevie
         {['交易者', '股票', '买入日期', '卖出日期', '数量', '成本金额', '净回收', '已实现盈亏', '收益率', '持有天数'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.history_id} className="group hover:bg-elevated/30">
+        <tr key={row.history_id} className="group hover:bg-elevated/50">
           <td className={td}>{traderLabel(row.trader)}</td>
           <StockColumn row={row} onPreview={onPreview} />
           <td className={td}>{row.open_date}</td>
@@ -138,7 +137,7 @@ export function RecordTable({ rows, onEdit, onDelete, onPreview }: { rows: Trade
         {['日期 / 时间', '交易者', '股票', '方向', '价格', '数量', '费用 / 税费', '备注', '操作'].map(label => <th key={label} className={th}>{label}</th>)}
       </tr></thead>
       <tbody>{rows.map(row => (
-        <tr key={row.id} className="group hover:bg-elevated/30">
+        <tr key={row.id} className="group hover:bg-elevated/50">
           <td className={td}>{row.trade_date}<span className="ml-1 text-muted">{row.trade_time ?? ''}</span></td>
           <td className={td}>{traderLabel(row.trader)}</td>
           <StockColumn row={row} onPreview={onPreview} />
@@ -165,10 +164,11 @@ function ReviewStockText({ content, stockNames, onPreview }: { content: string; 
     {segments.map((segment, index) => {
       if (segment.kind === 'text') return <span key={index}>{segment.text}</span>
       const label = segment.via === 'name' ? `查看 ${segment.name} 详情` : `查看 ${segment.symbol} 详情`
+      // 每只股票自己的 group，悬停只改这一只。inline-flex 把块级 StockCell 留在段落里，不改组件默认 class。
       return (
-        <button key={index} type="button" className={stockButtonClass} aria-label={label} onClick={() => onPreview(segment.symbol, segment.name)}>
-          {segment.text}
-        </button>
+        <span key={index} className="group inline-flex max-w-full min-w-0 align-baseline">
+          <StockCell code={segment.symbol} name={segment.name} aria-label={label} onClick={() => onPreview(segment.symbol, segment.name)} />
+        </span>
       )
     })}
   </>

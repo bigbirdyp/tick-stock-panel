@@ -61,41 +61,97 @@ function render(node: ReactNode) {
   return container
 }
 
-function previewButtons() {
-  return Array.from(container?.querySelectorAll<HTMLButtonElement>('button') ?? []).filter(button => button.getAttribute('aria-label')?.startsWith('查看 '))
+const SHELL = 'flex items-center gap-1 text-left min-w-0'
+const CODE = 'font-mono text-foreground text-xs group-hover:text-accent transition-colors duration-150'
+const NAME = 'text-xs text-secondary truncate group-hover:text-foreground transition-colors duration-150'
+
+function previewButtons(root: ParentNode | null | undefined = container) {
+  return Array.from(root?.querySelectorAll<HTMLButtonElement>('button') ?? []).filter(button => button.getAttribute('aria-label')?.startsWith('查看 '))
 }
 
-it('复盘已知名称和代码点击回规范 symbol，原文与编辑删除仍在', () => {
+function prosePieces(paragraph: Element | null | undefined) {
+  return Array.from(paragraph?.children ?? [])
+    .filter(el => el instanceof HTMLElement && el.querySelector('button') == null)
+    .map(el => el.textContent ?? '')
+}
+
+it('复盘已识别股票按共享代码名称展示，点代码和名称都打开原股票，原文与编辑删除仍在', () => {
   const opened: Array<{ symbol: string; name: string }> = []
   const edited: string[] = []
+  const editedContent: string[] = []
   const deleted: string[] = []
   render(<ReviewListView
     rows={[review, { ...review, id: 'rev-noise', content: ignored }]}
     stockNames={names}
     onPreview={(symbol, name) => opened.push({ symbol, name })}
-    onEdit={item => edited.push(item.id)}
+    onEdit={item => { edited.push(item.id); editedContent.push(item.content) }}
     onDelete={item => deleted.push(item.id)}
   />)
 
   const articles = container?.querySelectorAll('article') ?? []
-  expect(articles[0]?.querySelector('p')?.textContent).toBe(recognized)
+  const paragraph = articles[0]?.querySelector('p')
+  expect(paragraph?.className.split(/\s+/) ?? []).not.toContain('group')
+  expect(articles[0]?.className.split(/\s+/) ?? []).not.toContain('group')
+  expect(prosePieces(paragraph)).toEqual(['今天买入', '，关注', '，', '\n', ' 备注'])
+  expect(paragraph?.textContent).toBe('今天买入600519.SH贵州茅台，关注600519.SH贵州茅台，000001.SZ\n600519.SH贵州茅台 备注')
+  expect(paragraph?.textContent).not.toBe(recognized)
   expect(articles[1]?.querySelector('p')?.textContent).toBe(ignored)
-  expect(articles[1]?.querySelector('button[aria-label^="查看 "]')).toBeNull()
+  expect(previewButtons(articles[1])).toHaveLength(0)
 
-  const buttons = previewButtons()
-  expect(buttons.map(button => button.textContent)).toEqual(['贵州茅台', '600519', '000001', '600519.SH'])
-  for (const button of buttons) act(() => button.click())
+  const buttons = previewButtons(articles[0])
+  expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual([
+    '查看 贵州茅台 详情',
+    '查看 600519.SH 详情',
+    '查看 000001.SZ 详情',
+    '查看 600519.SH 详情',
+  ])
+  expect(buttons.map(button => Array.from(button.children).map(el => el.textContent))).toEqual([
+    ['600519.SH', '贵州茅台'],
+    ['600519.SH', '贵州茅台'],
+    ['000001.SZ'],
+    ['600519.SH', '贵州茅台'],
+  ])
+  const groups = buttons.map(button => button.parentElement)
+  expect(new Set(groups).size).toBe(buttons.length)
+  for (const button of buttons) {
+    expect(button.type).toBe('button')
+    expect(button.className).toBe(SHELL)
+    expect(button.parentElement?.tagName).toBe('SPAN')
+    expect(button.parentElement?.className).toBe('group inline-flex max-w-full min-w-0 align-baseline')
+    const [code, name] = Array.from(button.children)
+    expect(code?.className).toBe(CODE)
+    if (name) expect(name.className).toBe(NAME)
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+    act(() => { button.dispatchEvent(enter); button.dispatchEvent(space) })
+    expect(enter.defaultPrevented).toBe(false)
+    expect(space.defaultPrevented).toBe(false)
+    act(() => { if (code instanceof HTMLElement) code.click() })
+    if (name instanceof HTMLElement) act(() => name.click())
+  }
   expect(opened).toEqual([
     { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '600519.SH', name: '贵州茅台' },
+    { symbol: '600519.SH', name: '贵州茅台' },
+    { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '000001.SZ', name: '' },
+    { symbol: '600519.SH', name: '贵州茅台' },
     { symbol: '600519.SH', name: '贵州茅台' },
   ])
 
   act(() => container?.querySelector<HTMLButtonElement>('[aria-label="编辑 杨鹏 2026-10-19 复盘"]')?.click())
   act(() => container?.querySelector<HTMLButtonElement>('[aria-label="删除 杨鹏 2026-10-19 复盘"]')?.click())
   expect(edited).toEqual(['rev-maotai'])
+  expect(editedContent).toEqual([recognized])
   expect(deleted).toEqual(['rev-maotai'])
+})
+
+it('没有预览回调时复盘仍是原文，不出现股票按钮', () => {
+  render(<ReviewListView rows={[review]} stockNames={names} onEdit={() => {}} onDelete={() => {}} />)
+  const paragraph = container?.querySelector('p')
+  expect(paragraph?.textContent).toBe(recognized)
+  expect(paragraph?.querySelector('button')).toBeNull()
+  expect(previewButtons()).toHaveLength(0)
 })
 
 it('原始六位和空 symbol 显示规范后缀，错误后缀不可点', () => {
