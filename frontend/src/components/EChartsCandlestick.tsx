@@ -376,6 +376,224 @@ const CT = () => chartTheme(getTheme())
 
 /** 可见蜡烛超过此数量时，涨停/炸板标签切换为小圆点。 */
 const COMPACT_THRESHOLD = 60
+const MARKER_FONT = 'JetBrains Mono, monospace'
+
+function markerTrades(marker: ChartMarker): readonly ChartTradeDetail[] | null {
+  const trades = marker.trades
+  if (trades == null || trades.length === 0) return null
+  return trades
+}
+
+/** 只看逐笔方向。没有买也没有卖时返回 null，调用方继续走旧标记。 */
+function tradeDirection(trades: readonly ChartTradeDetail[]): 'buy' | 'sell' | 'both' | null {
+  let buy = false
+  let sell = false
+  for (const trade of trades) {
+    if (trade.side === 'buy') buy = true
+    else if (trade.side === 'sell') sell = true
+    if (buy && sell) return 'both'
+  }
+  if (buy) return 'buy'
+  if (sell) return 'sell'
+  return null
+}
+
+/** chartTheme 没有实色画布背景，文字描边继续用现有深浅两色。 */
+function textHalo(): string {
+  return getTheme() === 'dark' ? '#18181B' : '#FFFFFF'
+}
+
+/** 成交价和数量按原始数值显示，不收成均价、区间或固定小数。 */
+function formatExactNumber(value: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return Object.is(value, -0) ? '0' : String(value)
+}
+
+function appendTooltipText(parent: HTMLElement, value: string, color?: string): void {
+  const span = document.createElement('span')
+  span.textContent = value
+  if (color) span.style.color = color
+  parent.appendChild(span)
+}
+
+/**
+ * 逐笔来自交易记录接口。用元素的 textContent 写入，避免 trader/date 被当成 HTML。
+ * 当天全部保留，靠最大高度滚动，不截断。
+ */
+function buildTradeTooltip(trades: readonly ChartTradeDetail[]): HTMLElement {
+  const root = document.createElement('div')
+  root.style.maxWidth = 'min(340px, calc(100vw - 24px))'
+  root.style.maxHeight = 'min(240px, 60vh)'
+  root.style.overflowY = 'auto'
+  root.style.overflowX = 'hidden'
+  root.style.boxSizing = 'border-box'
+  root.style.font = `12px/1.45 ${MARKER_FONT}`
+  root.style.color = CT().tooltipText
+  const header = document.createElement('div')
+  header.textContent = '日期 方向 价格 数量 交易员'
+  root.appendChild(header)
+  for (const trade of trades) {
+    const row = document.createElement('div')
+    row.style.display = 'flex'
+    row.style.flexWrap = 'wrap'
+    row.style.columnGap = '8px'
+    row.style.padding = '1px 0'
+    const sideLabel = trade.side === 'buy' ? '买' : trade.side === 'sell' ? '卖' : String(trade.side)
+    const sideColor = trade.side === 'buy' ? THEME.bull : trade.side === 'sell' ? THEME.bear : undefined
+    appendTooltipText(row, String(trade.date ?? ''))
+    appendTooltipText(row, sideLabel, sideColor)
+    appendTooltipText(row, `价 ${formatExactNumber(trade.price)}`)
+    appendTooltipText(row, `量 ${formatExactNumber(trade.quantity)}`)
+    appendTooltipText(row, typeof trade.trader === 'string' ? trade.trader : String(trade.trader ?? ''))
+    root.appendChild(row)
+  }
+  return root
+}
+
+function tradeTooltipOption(trades: readonly ChartTradeDetail[]) {
+  return {
+    trigger: 'item' as const,
+    show: true,
+    enterable: true,
+    confine: true,
+    hideDelay: 400,
+    backgroundColor: CT().tooltipBg,
+    borderColor: CT().tooltipBorder,
+    borderWidth: 1,
+    padding: [8, 10] as [number, number],
+    textStyle: { color: CT().tooltipText, fontSize: 12, fontFamily: MARKER_FONT },
+    extraCssText: 'box-shadow:none;max-width:min(360px,calc(100vw - 16px));',
+    formatter: () => buildTradeTooltip(trades),
+  }
+}
+
+/** 同一天买卖仍是一个 symbol：红上箭头和绿下箭头并列，文字各自着色。 */
+function dualTradeSymbol(): string {
+  const halo = textHalo()
+  const up = THEME.bull
+  const down = THEME.bear
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="22" viewBox="0 0 96 22">'
+    + `<path d="M4 15 L10 4 L16 15 M10 6 V17" fill="none" stroke="${up}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<text x="20" y="16" font-size="13" font-family="sans-serif" fill="${up}" stroke="${halo}" stroke-width="3" paint-order="stroke">买</text>`
+    + `<path d="M52 7 L58 18 L64 7 M58 16 V5" fill="none" stroke="${down}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<text x="68" y="16" font-size="13" font-family="sans-serif" fill="${down}" stroke="${halo}" stroke-width="3" paint-order="stroke">卖</text>`
+    + '</svg>'
+  return `image://data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
+}
+
+function legacyTradePoint(marker: ChartMarker, row: OHLC, isBuy: boolean, isSell: boolean) {
+  return {
+    name: marker.label ?? '',
+    coord: [marker.date, isBuy ? row.low : row.high],
+    symbol: 'arrow',
+    symbolSize: 12,
+    symbolRotate: isBuy ? 0 : 180,
+    symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+    itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+    label: {
+      show: !!marker.label,
+      formatter: marker.label ?? '',
+      position: isBuy ? 'bottom' : 'top',
+      distance: 8,
+      color: CT().text,
+      fontSize: 10,
+      fontFamily: MARKER_FONT,
+    },
+  }
+}
+
+function tradeDetailPoint(marker: ChartMarker, row: OHLC, trades: readonly ChartTradeDetail[]) {
+  const direction = tradeDirection(trades)
+  const tooltip = tradeTooltipOption(trades)
+  // 坐标只用这根 K 线的高/低。成交价是未复权原始价，不能拿来当图上的 y。
+  if (direction === 'both') {
+    return {
+      name: marker.label ?? '买/卖',
+      coord: [marker.date, row.high],
+      symbol: dualTradeSymbol(),
+      symbolSize: [96, 22],
+      symbolOffset: [0, '-70%'],
+      itemStyle: { color: 'transparent' },
+      label: { show: false },
+      tooltip,
+      z: 10,
+    }
+  }
+  if (direction == null) {
+    const isBuy = marker.kind === 'buy'
+    return { ...legacyTradePoint(marker, row, isBuy, marker.kind === 'sell'), tooltip }
+  }
+  const isBuy = direction === 'buy'
+  return {
+    name: marker.label ?? (isBuy ? '买' : '卖'),
+    coord: [marker.date, isBuy ? row.low : row.high],
+    symbol: 'arrow',
+    symbolSize: 12,
+    symbolRotate: isBuy ? 0 : 180,
+    symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+    itemStyle: { color: isBuy ? THEME.bull : THEME.bear },
+    label: {
+      show: true,
+      formatter: isBuy ? '买' : '卖',
+      position: isBuy ? 'bottom' : 'top',
+      distance: 8,
+      color: isBuy ? THEME.bull : THEME.bear,
+      fontSize: 10,
+      fontFamily: MARKER_FONT,
+      textBorderColor: textHalo(),
+      textBorderWidth: 2,
+    },
+    tooltip,
+    z: 10,
+  }
+}
+
+function buildMarkPointData(
+  markers: readonly ChartMarker[] | undefined,
+  data: readonly OHLC[],
+  dateIndexMap: Map<string, number>,
+  compact: boolean,
+): any[] {
+  const markPointData: any[] = []
+  if (!markers || markers.length === 0) return markPointData
+  for (const marker of markers) {
+    const idx = dateIndexMap.get(marker.date)
+    if (idx == null) continue
+    const row = data[idx]
+    if (!row) continue
+    const isBuy = marker.kind === 'buy'
+    const isSell = marker.kind === 'sell'
+    if (marker.above) {
+      const dotColor = marker.color ?? (isBuy ? '#FACC15' : CT().text)
+      if (compact) {
+        markPointData.push({
+          name: marker.date, coord: [marker.date, row.high],
+          symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
+          itemStyle: { color: dotColor, cursor: 'pointer' },
+          label: { show: false }, z: 100, zlevel: 10,
+        })
+      } else {
+        markPointData.push({
+          name: marker.date, coord: [marker.date, row.high],
+          symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
+          itemStyle: { color: 'transparent' },
+          label: {
+            show: true, formatter: marker.label ?? '', position: 'top', distance: 0,
+            color: dotColor, fontSize: 10, fontWeight: 'normal',
+            fontFamily: MARKER_FONT,
+          },
+          z: 100, zlevel: 10,
+        })
+      }
+    } else {
+      const trades = markerTrades(marker)
+      markPointData.push(trades
+        ? tradeDetailPoint(marker, row, trades)
+        : legacyTradePoint(marker, row, isBuy, isSell))
+    }
+  }
+  return markPointData
+}
 
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
@@ -499,55 +717,10 @@ function buildOption(
 
   const hasMA = showMA && data.some(d => d.ma5 != null || d.ma10 != null || d.ma20 != null || d.ma60 != null)
 
-  const markPointData: any[] = []
-  if (markers && markers.length > 0) {
-    for (const m of markers) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
-  }
+  const markPointData = buildMarkPointData(markers, data, dateIndexMap, compact)
+  // 根 tooltip 是 axis 时，轴指示器的 showTip 会盖掉 markPoint 的 item tooltip。
+  // 有逐笔才改成 item；十字线仍由 axisPointer.type=cross 画出。没有逐笔则保持原样。
+  const tradeTips = markers?.some(marker => markerTrades(marker) != null) ?? false
 
   // ====== 布局计算 ======
   const left = 60
@@ -848,7 +1021,7 @@ function buildOption(
     animation: false,
     backgroundColor: THEME.bg,
     tooltip: {
-      trigger: 'axis',
+      trigger: tradeTips ? 'item' : 'axis',
       axisPointer: { type: 'cross', crossStyle: { color: CT().crosshair } },
       backgroundColor: 'transparent',
       borderWidth: 0,
@@ -1191,52 +1364,7 @@ export function EChartsCandlestick({
     const mkrs = showMarkersProp ? markers : undefined
     const compact = compactRef.current
     const seriesUpdates: any[] = []
-    const markPointData: any[] = []
-    for (const m of mkrs ?? []) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
+    const markPointData = buildMarkPointData(mkrs, data, dateIndexMap, compact)
     if (mkrs?.length) {
       seriesUpdates.push({
         name: 'K',
