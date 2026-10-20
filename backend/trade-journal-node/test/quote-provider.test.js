@@ -292,3 +292,89 @@ test('a newer qfq-only bar gets that day raw and does not keep the older batch q
   assert.equal(quotes.get('600519.SH').price_as_of, AS_OF);
   assert.equal(quotes.get('600519.SH').price_status, 'fresh');
 });
+
+test('one failed GET drops only that symbol and the next call retries it', async () => {
+  let posts = 0;
+  const gets = [];
+  const provider = createDailyQuoteProvider({
+    baseUrl: 'http://market.example',
+    now: () => 0,
+    logger: { warn() {} },
+    fetchImpl(url, init) {
+      if (init.method === 'POST') {
+        posts += 1;
+        return {
+          ok: true,
+          status: 200,
+          json() {
+            return {
+              data: {
+                '600000.SH': [
+                  { date: AS_OF, raw_close: '21.08', close: '18.01' },
+                ],
+                '000001.SZ': [
+                  { date: AS_OF, close: '7.77' },
+                ],
+                '000002.SZ': [
+                  { date: AS_OF, close: '4.44' },
+                ],
+              },
+            };
+          },
+        };
+      }
+      const symbol = new URL(url).searchParams.get('symbol');
+      gets.push(symbol);
+      if (symbol === '000002.SZ' && gets.filter((item) => item === '000002.SZ').length === 1) {
+        return {
+          ok: false,
+          status: 500,
+          json() {
+            throw new Error('error body must stay unread');
+          },
+        };
+      }
+      const raw = symbol === '000001.SZ' ? '8.88' : '3.33';
+      const close = symbol === '000001.SZ' ? '1.11' : '9.99';
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          return {
+            symbol,
+            rows: [{ date: AS_OF, raw_close: raw, close }],
+          };
+        },
+      };
+    },
+  });
+
+  const symbols = ['600000.SH', '000001.SZ', '000002.SZ'];
+  const first = await provider(symbols, AS_OF);
+  assert.equal(posts, 1);
+  assert.deepEqual(gets, ['000001.SZ', '000002.SZ']);
+  assert.equal(first.size, 2);
+  assert.equal(first.has('000002.SZ'), false);
+  assert.deepEqual(first.get('600000.SH'), {
+    price: '21.08',
+    price_as_of: AS_OF,
+    price_status: 'fresh',
+  });
+  assert.deepEqual(first.get('000001.SZ'), {
+    price: '8.88',
+    price_as_of: AS_OF,
+    price_status: 'fresh',
+  });
+
+  const second = await provider(symbols, AS_OF);
+  assert.equal(posts, 2);
+  assert.deepEqual(gets, ['000001.SZ', '000002.SZ', '000002.SZ']);
+  assert.equal(second.size, 3);
+  assert.deepEqual(second.get('600000.SH'), first.get('600000.SH'));
+  assert.deepEqual(second.get('000001.SZ'), first.get('000001.SZ'));
+  assert.deepEqual(second.get('000002.SZ'), {
+    price: '3.33',
+    price_as_of: AS_OF,
+    price_status: 'fresh',
+  });
+});

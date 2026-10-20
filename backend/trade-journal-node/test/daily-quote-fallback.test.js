@@ -268,3 +268,147 @@ test('as-of live raw_close stays fresh and an older live bar stays stale', async
     quote: { price: '10.5', price_as_of: '2026-10-16', price_status: 'stale' },
   });
 });
+
+test('two calls share four slots while json bodies stay pending', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let started = 0;
+  // json() is invoked a microtask after fetch returns. started can hit 6
+  // while this is still behind, and releases is empty in that gap.
+  let jsonOpened = 0;
+  const releases = [];
+  const leftSymbols = ['L1.SZ', 'L2.SZ', 'L3.SZ'];
+  const rightSymbols = ['R1.SZ', 'R2.SZ', 'R3.SZ'];
+  const followSymbols = ['N1.SZ', 'N2.SZ', 'N3.SZ', 'N4.SZ'];
+  const fallback = createDailyQuoteFallback({
+    concurrency: 8,
+    fetchImpl(url) {
+      const symbol = new URL(url).searchParams.get('symbol');
+      started += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          jsonOpened += 1;
+          return new Promise((resolve) => {
+            releases.push(() => {
+              inFlight -= 1;
+              resolve({
+                symbol,
+                rows: [{ date: AS_OF, raw_close: '1.25', close: '9' }],
+              });
+            });
+          });
+        },
+      };
+    },
+  });
+
+  const quote = {
+    cacheable: true,
+    quote: { price: '1.25', price_as_of: AS_OF, price_status: 'fresh' },
+  };
+  const left = fallback(leftSymbols, AS_OF);
+  const right = fallback(rightSymbols, AS_OF);
+  await until(() => started === 4 && releases.length === 4);
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  assert.equal(started, 4);
+  assert.equal(maxInFlight, 4);
+  assert.equal(inFlight, 4);
+
+  releases.shift()();
+  await until(() => started === 5 && releases.length === 4);
+  assert.equal(maxInFlight, 4);
+  assert.equal(inFlight, 4);
+
+  for (
+    let i = 0;
+    i < 80 && (started < 6 || jsonOpened < started || releases.length > 0);
+    i += 1
+  ) {
+    if (releases.length > 0) releases.shift()();
+    await Promise.resolve();
+  }
+  assert.equal(started, 6);
+  assert.equal(releases.length, 0);
+  assert.equal(maxInFlight, 4);
+
+  const [leftOut, rightOut] = await Promise.all([left, right]);
+  assert.equal(inFlight, 0);
+  assert.equal(leftOut.size, 3);
+  assert.equal(rightOut.size, 3);
+  for (const symbol of leftSymbols) assert.deepEqual(leftOut.get(symbol), quote);
+  for (const symbol of rightSymbols) assert.deepEqual(rightOut.get(symbol), quote);
+
+  const follow = fallback(followSymbols, AS_OF);
+  await until(() => started === 10 && releases.length === 4);
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  assert.equal(started, 10);
+  assert.equal(maxInFlight, 4);
+  assert.equal(inFlight, 4);
+
+  for (let i = 0; i < 40 && releases.length > 0; i += 1) {
+    releases.shift()();
+    await Promise.resolve();
+  }
+  const followOut = await follow;
+  assert.equal(started, 10);
+  assert.equal(releases.length, 0);
+  assert.equal(inFlight, 0);
+  assert.equal(maxInFlight, 4);
+  assert.equal(followOut.size, 4);
+  for (const symbol of followSymbols) assert.deepEqual(followOut.get(symbol), quote);
+});
+
+test('same symbol and asOf hits at 59999ms and refetches at 60000ms', async () => {
+  let nowMs = 0;
+  let calls = 0;
+  const urls = [];
+  const fallback = createDailyQuoteFallback({
+    now: () => nowMs,
+    fetchImpl(url) {
+      calls += 1;
+      urls.push(url);
+      const symbol = new URL(url).searchParams.get('symbol');
+      const raw = calls === 1 ? '15.67' : '16.01';
+      return quoteResponse(symbol, [
+        { date: AS_OF, raw_close: raw, close: '1.00' },
+      ]);
+    },
+  });
+
+  const first = await fallback(['LIVE.SZ'], AS_OF);
+  assert.equal(calls, 1);
+  assert.equal(new URL(urls[0]).searchParams.get('end_date'), AS_OF);
+  assert.deepEqual(first.get('LIVE.SZ'), {
+    cacheable: true,
+    quote: { price: '15.67', price_as_of: AS_OF, price_status: 'fresh' },
+  });
+
+  const returned = first.get('LIVE.SZ').quote;
+  returned.price = '0';
+  returned.price_status = 'stale';
+
+  nowMs = 59_999;
+  const withinTtl = await fallback(['LIVE.SZ'], AS_OF);
+  assert.equal(calls, 1);
+  assert.equal(urls.length, 1);
+  assert.equal(returned.price, '0');
+  assert.equal(returned.price_status, 'stale');
+  assert.deepEqual(withinTtl.get('LIVE.SZ'), {
+    cacheable: true,
+    quote: { price: '15.67', price_as_of: AS_OF, price_status: 'fresh' },
+  });
+
+  nowMs = 60_000;
+  const expired = await fallback(['LIVE.SZ'], AS_OF);
+  assert.equal(calls, 2);
+  assert.equal(new URL(urls[1]).searchParams.get('end_date'), AS_OF);
+  assert.deepEqual(expired.get('LIVE.SZ'), {
+    cacheable: true,
+    quote: { price: '16.01', price_as_of: AS_OF, price_status: 'fresh' },
+  });
+  assert.equal(returned.price, '0');
+});
