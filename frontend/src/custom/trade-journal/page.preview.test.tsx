@@ -25,12 +25,14 @@ notifyManager.setNotifyFunction(callback => { act(callback) })
 
 let dispose: (() => Promise<void>) | undefined
 beforeEach(() => {
+  window.localStorage.clear()
   notifyManager.setNotifyFunction(callback => { act(callback) })
   window.history.replaceState(null, '', '/')
 })
 afterEach(async () => {
   await dispose?.()
   dispose = undefined
+  window.localStorage.clear()
   window.history.replaceState(null, '', '/')
   notifyManager.setNotifyFunction(callback => callback())
 })
@@ -109,9 +111,10 @@ async function closePreview(container: HTMLElement) {
 }
 
 it('持仓名称和代码打开茅台详情，关闭后交易者和栏目不变', async () => {
+  window.localStorage.setItem('tf-trade-journal-trader', 'AI选股:atr_pct')
   const container = await renderPage()
   await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
-  expect(selectedTrader(container)).toBe('全部')
+  expect(selectedTrader(container)).toBe('AI选股:atr_pct')
   expect(selectedColumn(container)).toBe('当前持仓')
 
   const holding = stockCell(container, '600519.SH', '贵州茅台')
@@ -120,15 +123,16 @@ it('持仓名称和代码打开茅台详情，关闭后交易者和栏目不变'
   expect(byName.textContent).toContain('600519.SH')
   expect(byName.textContent).toContain('贵州茅台')
   await closePreview(container)
-  expect(selectedTrader(container)).toBe('全部')
+  expect(selectedTrader(container)).toBe('AI选股:atr_pct')
   expect(selectedColumn(container)).toBe('当前持仓')
-  expect(window.location.search).toBe('')
+  expect(new URLSearchParams(window.location.search).get('trader')).toBe('AI选股:atr_pct')
+  expect(new URLSearchParams(window.location.search).get('tab')).toBe('positions')
 
   const byCode = await openPreviewFrom(container, holding?.code ?? null)
   expect(byCode.textContent).toContain('600519.SH')
   expect(byCode.textContent).toContain('贵州茅台')
   await closePreview(container)
-  expect(selectedTrader(container)).toBe('全部')
+  expect(selectedTrader(container)).toBe('AI选股:atr_pct')
   expect(selectedColumn(container)).toBe('当前持仓')
   expect(container.querySelector('[aria-label="持仓截止日期"]')).not.toBeNull()
 })
@@ -138,7 +142,7 @@ it('筛选后的记录和历史收益打开对应股票，关闭后交易者、�
   const container = await renderPage()
   await vi.waitFor(() => {
     const names = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易者"] [role="tab"]')).map(traderName)
-    expect(names).toEqual(['全部', '杨鹏', 'AI选股:atr_pct'])
+    expect(names).toEqual(['杨鹏', 'AI选股:atr_pct'])
   })
   await clickTrader(container, '杨鹏')
   await clickColumn(container, '交易记录')

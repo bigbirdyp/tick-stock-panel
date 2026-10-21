@@ -14,7 +14,7 @@ import { RecordForm, ReviewForm } from './forms'
 import { HistoryTable, Pager, PositionTable, RecordTable, ResultState, ReviewListView } from './lists'
 import { aliasesFromPayload, indexStockNames, type StockAlias } from './reviewStocks'
 import { loadStockMarkerSet, parseStockMarkerQuery, stockMarkerQueryString, stockMarkerSetMatches } from './stockMarkers'
-import { TraderTabs } from './traderTabs'
+import { resolveTraderSelection, TraderTabs } from './traderTabs'
 import type {
   DailyReview,
   HistoryQuery,
@@ -43,7 +43,7 @@ function isJournalTab(value: string | null): value is Tab {
 }
 
 // 挂载和浏览器后退前进都读地址栏。jsdom 与浏览器都用 location.search；没有 window 时按缺省处理。
-// 非法或缺省 tab 回到持仓；空白或缺省 trader 表示「全部」。
+// 非法或缺省 tab 回到持仓；交易者在名册载入后解析。
 function readLocationSearch(): string {
   if (typeof window === 'undefined') return ''
   const search = window.location?.search
@@ -53,10 +53,11 @@ function readLocationSearch(): string {
 // 用户点选交易者或栏目时写回地址栏。其它查询参数和 hash 原样保留。
 // 解析后的查询与当前一致则不 pushState，避免重复历史。
 // 后退前进只读地址栏，不在这里写历史。
-function pushJournalSearch(update: (params: URLSearchParams) => void): void {
+function pushJournalSearch(update: (params: URLSearchParams) => void, replace = false): void {
   if (typeof window === 'undefined') return
   const history = window.history
-  if (typeof history?.pushState !== 'function') return
+  const write = replace ? history?.replaceState : history?.pushState
+  if (typeof write !== 'function') return
   const current = new URLSearchParams(readLocationSearch())
   const next = new URLSearchParams(current)
   update(next)
@@ -64,17 +65,17 @@ function pushJournalSearch(update: (params: URLSearchParams) => void): void {
   const query = next.toString()
   const pathname = typeof window.location.pathname === 'string' ? window.location.pathname : ''
   const hash = typeof window.location.hash === 'string' ? window.location.hash : ''
-  history.pushState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
+  write.call(history, null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
 }
 
-// 「全部」或空白交易者删除 trader，并在同一次历史记录里写上当前栏目。
-function writeTraderSelection(trader: string | undefined, nextTab: Tab): void {
+// 初始化或名册回退只替换当前历史；用户切换则新增历史。
+function writeTraderSelection(trader: string | undefined, nextTab: Tab, replace = false): void {
   pushJournalSearch(params => {
     const name = trader?.trim() ?? ''
     if (name) params.set('trader', name)
     else params.delete('trader')
     params.set('tab', nextTab)
-  })
+  }, replace)
 }
 
 // 只改 tab，保留地址栏里现有的 trader。
@@ -82,6 +83,21 @@ function writeTabSelection(next: Tab): void {
   pushJournalSearch(params => {
     params.set('tab', next)
   })
+}
+
+const traderStorageKey = 'tf-trade-journal-trader'
+
+function savedTrader(): string | null {
+  try { return typeof window === 'undefined' ? null : window.localStorage.getItem(traderStorageKey) }
+  catch { return null }
+}
+
+function rememberTrader(trader: string | undefined): void {
+  if (typeof window === 'undefined') return
+  try {
+    if (trader) window.localStorage.setItem(traderStorageKey, trader)
+    else window.localStorage.removeItem(traderStorageKey)
+  } catch { /* 存储不可用时，地址栏仍保留当前选择。 */ }
 }
 
 function initialJournalView(): { tab: Tab; trader?: string } {
@@ -133,35 +149,36 @@ export function TradeJournalPage() {
     queryKey: QK.tradeJournalTraders(),
     queryFn: () => journal.listTraders(),
   })
+  const hasSelectedTrader = traders.isSuccess && !!recordQuery.trader
+    && traders.data.data.traders.some(item => item.trader === recordQuery.trader)
   const positions = useQuery({
     queryKey: QK.tradeJournalPositions(JSON.stringify(positionQuery)),
     queryFn: () => journal.currentPositions(positionQuery),
-    enabled: tab === 'positions',
+    enabled: hasSelectedTrader && tab === 'positions',
   })
   const history = useQuery({
     queryKey: QK.tradeJournalHistory(JSON.stringify(historyQuery)),
     queryFn: () => journal.history(historyQuery),
-    enabled: tab === 'history',
+    enabled: hasSelectedTrader && tab === 'history',
   })
   const records = useQuery({
     queryKey: QK.tradeJournalRecords(JSON.stringify(recordQuery)),
     queryFn: () => journal.listRecords(recordQuery),
-    enabled: tab === 'records',
+    enabled: hasSelectedTrader && tab === 'records',
   })
   const reviews = useQuery({
     queryKey: QK.tradeJournalReviews(JSON.stringify(reviewQuery)),
     queryFn: () => journal.listReviews(reviewQuery),
-    enabled: tab === 'reviews',
+    enabled: hasSelectedTrader && tab === 'reviews',
   })
-  // 预览打开且股票是六位代码时读取成交。交易员缺省表示全部，不把「全部」当成名字；
-  // 空白名字不是全部，不请求。关闭预览也不请求。
+  // 只在名册中的当前交易者工作区内读取该股票成交。
   // 返回的 code 和 scope 必须对上当前选择，换股或换人时先不显示上一套。
   // 失败只提示，不把标记传成空数组，避免看起来像这只股票没有成交。
   const markerCode = stockPreview?.symbol.slice(0, 6) ?? ''
   const requestedTrader = recordQuery.trader
   const blankTrader = requestedTrader != null && requestedTrader.trim() === ''
   const markerTrader = blankTrader ? undefined : requestedTrader
-  const markersEnabled = stockPreview != null && !blankTrader && /^[0-9]{6}$/.test(markerCode)
+  const markersEnabled = hasSelectedTrader && stockPreview != null && !blankTrader && /^[0-9]{6}$/.test(markerCode)
   const stockMarkerLoad = useQuery({
     queryKey: QK.tradeJournalRecords(stockMarkerQueryString(markerCode, markerTrader)),
     queryFn: ({ queryKey }) => {
@@ -192,7 +209,7 @@ export function TradeJournalPage() {
   const marketSnapshot = useQuery({
     queryKey: QK.marketSnapshot,
     queryFn: api.marketSnapshot,
-    enabled: tab === 'reviews',
+    enabled: hasSelectedTrader && tab === 'reviews',
     staleTime: 60_000,
   })
 
@@ -273,6 +290,8 @@ export function TradeJournalPage() {
   }
 
   const selectTrader = (trader: string | undefined) => {
+    if (!trader || !traders.data?.data.traders.some(item => item.trader === trader)) return
+    rememberTrader(trader)
     setPositionQuery(query => withTrader(query, trader))
     setHistoryQuery(query => withTrader(query, trader))
     setRecordQuery(query => withTrader(query, trader))
@@ -280,16 +299,21 @@ export function TradeJournalPage() {
     writeTraderSelection(trader, tab)
   }
 
-  // 只消费浏览器后退前进。四条列表都按地址栏交易者过滤；「全部」则去掉 trader。
+  // 后退前进同样服从地址栏优先、存储次之、首位兜底的规则。
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
     const restoreJournalFromHistory = () => {
       const next = initialJournalView()
       setTab(next.tab)
+      if (!traders.isSuccess) return
+      const trader = resolveTraderSelection(traders.data?.data.traders ?? [], new URLSearchParams(readLocationSearch()).get('trader'), savedTrader())
+      rememberTrader(trader)
+      writeTraderSelection(trader, next.tab, true)
+      setTab(next.tab)
       const applyTrader = <T extends { trader?: string; offset?: number }>(query: T): T => {
         const current = query.trader?.trim() || undefined
-        if (current === next.trader) return query
-        return withTrader(query, next.trader)
+        if (current === trader) return query
+        return withTrader(query, trader)
       }
       setPositionQuery(query => applyTrader(query))
       setHistoryQuery(query => applyTrader(query))
@@ -303,28 +327,28 @@ export function TradeJournalPage() {
     }
     window.addEventListener('popstate', restoreJournalFromHistory)
     return () => window.removeEventListener('popstate', restoreJournalFromHistory)
-  }, [])
+  }, [traders.data, traders.isSuccess])
 
   useEffect(() => {
-    const selected = recordQuery.trader
-    if (!selected || !traders.isSuccess || traders.isFetching) return
-    if (traders.data.data.traders.some(item => item.trader === selected)) return
-    setPositionQuery(query => withTrader(query, undefined))
-    setHistoryQuery(query => withTrader(query, undefined))
-    setRecordQuery(query => withTrader(query, undefined))
-    setReviewQuery(query => withTrader(query, undefined))
-    // 名册里已没有该交易者。replaceState 删掉地址栏里的 trader，不新增历史；tab、其它参数和 hash 保留。
-    if (typeof window === 'undefined') return
-    const history = window.history
-    if (typeof history?.replaceState !== 'function') return
-    const current = new URLSearchParams(readLocationSearch())
-    if (!current.has('trader')) return
-    current.delete('trader')
-    const query = current.toString()
-    const pathname = typeof window.location.pathname === 'string' ? window.location.pathname : ''
-    const hash = typeof window.location.hash === 'string' ? window.location.hash : ''
-    history.replaceState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
-  }, [recordQuery.trader, traders.data, traders.isSuccess, traders.isFetching])
+    if (!traders.isSuccess || traders.isFetching) return
+    const trader = resolveTraderSelection(traders.data.data.traders, new URLSearchParams(readLocationSearch()).get('trader'), savedTrader())
+    if (recordQuery.trader !== trader) {
+      setPositionQuery(query => withTrader(query, trader))
+      setHistoryQuery(query => withTrader(query, trader))
+      setRecordQuery(query => withTrader(query, trader))
+      setReviewQuery(query => withTrader(query, trader))
+    }
+    rememberTrader(trader)
+    writeTraderSelection(trader, tab, true)
+  }, [recordQuery.trader, traders.data, traders.isSuccess, traders.isFetching, tab])
+
+  useEffect(() => {
+    setRecordEditor(null)
+    setReviewEditor(null)
+    setStockPreview(null)
+    setDeletion(null)
+    setDeleteError(null)
+  }, [recordQuery.trader])
 
   const applyCode = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -366,26 +390,27 @@ export function TradeJournalPage() {
         title="交易日记"
         className="flex-wrap"
         titleExtra={journal.mode === 'mock' ? <span className="rounded bg-warning/15 px-2 py-0.5 text-[10px] text-warning">示例数据</span> : undefined}
-        right={<div className="flex gap-2">
-          <button type="button" onClick={() => setRecordEditor('new')} className="inline-flex items-center gap-1 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white"><Plus className="h-3.5 w-3.5" />记交易</button>
-          <button type="button" onClick={() => setReviewEditor('new')} className="inline-flex items-center gap-1 rounded-btn border border-border px-3 py-1.5 text-xs text-secondary"><Plus className="h-3.5 w-3.5" />写复盘</button>
-        </div>}
       />
+      <div className="border-b border-border bg-surface px-4 py-3 sm:px-5">
+        <TraderTabs traders={traders.data?.data.traders ?? []} selected={recordQuery.trader} loading={traders.isPending} error={traders.error} onSelect={selectTrader} onRetry={() => void traders.refetch()} />
+      </div>
       <div className="flex-1 overflow-y-auto p-4 sm:p-5">
         <div className="mx-auto max-w-7xl space-y-4">
+          {traders.isSuccess && traders.data.data.traders.length === 0 && <div className="rounded-card border border-border bg-surface p-8 text-center">
+            <p className="mb-4 text-sm text-secondary">暂无交易员，点击记交易创建</p>
+            <button type="button" onClick={() => setRecordEditor('new')} className="inline-flex items-center gap-1 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white"><Plus className="h-3.5 w-3.5" />记交易</button>
+          </div>}
+          {hasSelectedTrader && <div className="space-y-4">
           <p className="text-xs text-muted">持仓与历史收益包含成交费用和税费。收益率为小数制 API 数值换算后的百分比；行情不可用时显示“—”，过期行情会标记。</p>
-          <div className="rounded-md border border-border bg-surface p-3">
-            <TraderTabs
-              traders={traders.data?.data.traders ?? []}
-              selected={recordQuery.trader}
-              loading={traders.isPending}
-              error={traders.error}
-              onSelect={selectTrader}
-              onRetry={() => void traders.refetch()}
-            />
-          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
           <div role="tablist" aria-label="交易日记栏目" onKeyDown={onTabKeyDown} className="flex flex-wrap gap-1 rounded-md border border-border bg-surface p-1">
             {tabs.map(item => <button key={item.key} id={`journal-tab-${item.key}`} type="button" role="tab" aria-controls="journal-panel" aria-selected={tab === item.key} tabIndex={tab === item.key ? 0 : -1} onClick={() => changeTab(item.key)} className={`rounded px-3 py-2 text-xs font-medium ${tab === item.key ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}>{item.label}</button>)}
+          </div>
+          <div className="ml-auto flex gap-2">
+            <button type="button" onClick={() => setRecordEditor('new')} className="inline-flex items-center gap-1 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white"><Plus className="h-3.5 w-3.5" />记交易</button>
+            <button type="button" onClick={() => setReviewEditor('new')} className="inline-flex items-center gap-1 rounded-btn border border-border px-3 py-1.5 text-xs text-secondary"><Plus className="h-3.5 w-3.5" />写复盘</button>
+          </div>
           </div>
 
           <section id="journal-panel" role="tabpanel" aria-labelledby={`journal-tab-${tab}`} className="overflow-hidden rounded-card border border-border bg-surface">
@@ -438,12 +463,13 @@ export function TradeJournalPage() {
               <Pager pagination={reviews.data?.data.pagination} onPage={offset => setReviewQuery(query => ({ ...query, offset }))} />
             </>}
           </section>
+          </div>}
         </div>
       </div>
 
       <StockPreviewDialog symbol={stockPreview?.symbol ?? null} name={stockPreview?.name} markers={previewMarkers} onClose={() => setStockPreview(null)} />
-      {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={recordEditor === 'new' ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
-      {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} defaultTrader={reviewEditor === 'new' ? reviewQuery.trader ?? '' : ''} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
+      {recordEditor !== null && <RecordForm key={recordEditor === 'new' ? 'new' : recordEditor.id} record={recordEditor === 'new' ? null : recordEditor} defaultTrader={hasSelectedTrader ? recordQuery.trader ?? '' : ''} onClose={() => setRecordEditor(null)} onSave={saveRecord} />}
+      {reviewEditor !== null && <ReviewForm key={reviewEditor === 'new' ? 'new' : reviewEditor.id} review={reviewEditor === 'new' ? null : reviewEditor} defaultTrader={hasSelectedTrader ? reviewQuery.trader ?? '' : ''} onClose={() => setReviewEditor(null)} onSave={saveReview} />}
       {deletion && <Modal onClose={() => !deleting && setDeletion(null)} ariaLabel="确认删除" panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface p-5 shadow-xl" closeOnBackdrop={!deleting}>
         <div className="space-y-4">
           <h2 className="text-base font-semibold">确认删除</h2>

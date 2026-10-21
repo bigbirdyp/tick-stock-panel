@@ -28,6 +28,7 @@ notifyManager.setNotifyFunction(callback => { act(callback) })
 
 let dispose: (() => Promise<void>) | undefined
 beforeEach(() => {
+  window.localStorage.clear()
   notifyManager.setNotifyFunction(callback => { act(callback) })
   window.history.replaceState(null, '', '/')
   vi.mocked(toast).mockClear()
@@ -35,6 +36,7 @@ beforeEach(() => {
 afterEach(async () => {
   await dispose?.()
   dispose = undefined
+  window.localStorage.clear()
   window.history.replaceState(null, '', '/')
   notifyManager.setNotifyFunction(callback => callback())
   vi.restoreAllMocks()
@@ -84,7 +86,8 @@ async function openPreview(container: HTMLElement, label: string) {
   return previewDialog(container)!
 }
 
-it('全部交易员打开详情会读取该股成交且不传 trader，关闭后不再请求', async () => {
+it('当前交易员打开详情只读取该交易员成交，关闭后不再请求', async () => {
+  window.localStorage.setItem('tf-trade-journal-trader', 'AI选股:atr_pct')
   const listRecords = vi.spyOn(journal, 'listRecords')
   const container = await renderPage()
   await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
@@ -97,8 +100,8 @@ it('全部交易员打开详情会读取该股成交且不传 trader，关闭后
     label: '买',
     trades: [{ date: '2026-10-12', side: 'buy', price: 1688.5, quantity: 100, trader: 'AI选股:atr_pct' }],
   }])
-  expect(listRecords).toHaveBeenCalledWith({ code: '600519', limit: 200, offset: 0, sort: 'trade_date_asc' })
-  expect(listRecords.mock.calls.every(([query]) => query?.trader == null)).toBe(true)
+  expect(listRecords).toHaveBeenCalledWith({ trader: 'AI选股:atr_pct', code: '600519', limit: 200, offset: 0, sort: 'trade_date_asc' })
+  expect(listRecords.mock.calls.every(([query]) => query?.trader === 'AI选股:atr_pct')).toBe(true)
   const calls = listRecords.mock.calls.length
   await act(async () => dialog.querySelector('button')?.click())
   expect(previewDialog(container)).toBeNull()
@@ -111,7 +114,7 @@ it('选定交易员后把该股逐笔标记交给详情，换股票或交易员�
   const container = await renderPage()
   await vi.waitFor(() => {
     const names = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易者"] [role="tab"]')).map(traderName)
-    expect(names).toEqual(['全部', '杨鹏', 'AI选股:atr_pct'])
+    expect(names).toEqual(['杨鹏', 'AI选股:atr_pct'])
   })
   await clickTrader(container, '杨鹏')
   await clickColumn(container, '历史收益')
@@ -131,7 +134,7 @@ it('选定交易员后把该股逐笔标记交给详情，换股票或交易员�
     const raw = previewDialog(container)?.getAttribute('data-markers') ?? ''
     expect(raw).not.toContain('10.8')
   })
-  await vi.waitFor(() => expect(previewDialog(container)?.getAttribute('data-markers')).toBe('[]'))
+  await vi.waitFor(() => expect(previewDialog(container)).toBeNull())
 
   await clickColumn(container, '当前持仓')
   await vi.waitFor(() => expect(container.querySelector('[aria-label="查看 贵州茅台 详情"]')).not.toBeNull())
@@ -157,7 +160,7 @@ it('切换交易员或股票时，新结果返回前不留下上一套标记', a
     return new Promise(resolve => { held.push({ query, finish: resolve }) })
   })
   const container = await renderPage()
-  await vi.waitFor(() => expect(container.textContent).toContain('贵州茅台'))
+  await vi.waitFor(() => expect(container.querySelector('#journal-tab-history')).not.toBeNull())
   await clickTrader(container, '杨鹏')
   await clickColumn(container, '历史收益')
   await vi.waitFor(() => expect(container.textContent).toContain('平安银行'))
@@ -165,10 +168,10 @@ it('切换交易员或股票时，新结果返回前不留下上一套标记', a
   await vi.waitFor(() => expect(pingan.getAttribute('data-markers')).toContain('"price":10.8'))
 
   await clickTrader(container, 'AI选股:atr_pct')
-  expect(previewDialog(container)?.getAttribute('data-markers')).toBe('')
+  expect(previewDialog(container)).toBeNull()
   expect(held).toHaveLength(1)
   held[0]?.finish(await real(held[0].query))
-  await vi.waitFor(() => expect(previewDialog(container)?.getAttribute('data-markers')).toBe('[]'))
+  await vi.waitFor(() => expect(previewDialog(container)).toBeNull())
 
   await clickColumn(container, '当前持仓')
   await vi.waitFor(() => expect(container.querySelector('[aria-label="查看 贵州茅台 详情"]')).not.toBeNull())
@@ -185,7 +188,7 @@ it('成交标记读取失败时详情仍在，且不把标记说成没有成交'
   const container = await renderPage()
   await vi.waitFor(() => {
     const names = Array.from(container.querySelectorAll<HTMLButtonElement>('[aria-label="交易者"] [role="tab"]')).map(traderName)
-    expect(names).toEqual(['全部', '杨鹏', 'AI选股:atr_pct'])
+    expect(names).toEqual(['杨鹏', 'AI选股:atr_pct'])
   })
   await clickTrader(container, '杨鹏')
   await clickColumn(container, '历史收益')

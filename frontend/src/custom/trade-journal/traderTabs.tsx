@@ -23,7 +23,7 @@ function sortedTraders(traders: readonly TraderSummary[]): TraderSummary[] {
 }
 
 /**
- * 在排序后的真实交易者里决定选中谁。候选不含「全部」，页面仍单独渲染该项。
+ * 在排序后的真实交易者里决定选中谁。候选只含名册中的交易者。
  * urlTrader 为 null 表示地址栏没有该参数；空字符串表示参数在场但为空。
  * 参数在场时只认名单里的名字：未知、已删除或空白落到第一人，不读已保存值。
  * 参数缺席时才用已保存的合法名字，否则也是第一人。没有交易者就没有选中值。
@@ -48,20 +48,16 @@ export function resolveTraderSelection(
 }
 
 /**
- * 外层交易者页签。第一项固定为「全部」，条数是各标签 record_count 之和。
- * 其余按记录数从多到少；记录数相同则按标签的 UTF-16 code unit 升序。
+ * 外层交易者页签按记录数从多到少；记录数相同则按标签的 UTF-16 code unit 升序。
  * GET /api/traders 本身不按记录数排序，这个次序只在客户端决定。
  */
 export function TraderTabs({ traders, selected, loading, error, onSelect, onRetry }: TraderTabsProps) {
   const sorted = sortedTraders(traders)
-  const recordTotal = sorted.reduce((sum, item) => sum + item.record_count, 0)
-  const items = [
-    { key: '', label: '全部', count: recordTotal },
-    ...sorted.map(item => ({ key: item.trader, label: item.trader, count: item.record_count })),
-  ]
+  const items = sorted.map(item => ({ key: item.trader, label: item.trader, count: item.record_count }))
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const selectedIndex = Math.max(0, items.findIndex(item => (item.key === '' ? selected == null : item.key === selected)))
+    if (items.length === 0) return
+    const selectedIndex = Math.max(0, items.findIndex(item => item.key === selected))
     const next = event.key === 'ArrowRight' ? (selectedIndex + 1) % items.length
       : event.key === 'ArrowLeft' ? (selectedIndex - 1 + items.length) % items.length
       : event.key === 'Home' ? 0
@@ -70,7 +66,7 @@ export function TraderTabs({ traders, selected, loading, error, onSelect, onRetr
     if (next < 0) return
     event.preventDefault()
     const item = items[next]
-    onSelect(item.key === '' ? undefined : item.key)
+    onSelect(item.key)
     event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
   }
 
@@ -78,15 +74,15 @@ export function TraderTabs({ traders, selected, loading, error, onSelect, onRetr
     <div className="space-y-2">
       <div role="tablist" aria-label="交易者" onKeyDown={onKeyDown} className="flex flex-wrap gap-1">
         {items.map(item => {
-          const active = item.key === '' ? selected == null : item.key === selected
+          const active = item.key === selected
           return (
             <button
-              key={item.key === '' ? 'all' : item.key}
+              key={item.key}
               type="button"
               role="tab"
               aria-selected={active}
               tabIndex={active ? 0 : -1}
-              onClick={() => onSelect(item.key === '' ? undefined : item.key)}
+              onClick={() => onSelect(item.key)}
               className={`rounded px-3 py-1.5 text-xs font-medium ${active ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'}`}
             >
               {item.label}

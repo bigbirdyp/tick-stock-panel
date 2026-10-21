@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, notifyManager } from '@tanstack/react-query'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TradeJournalPage } from './page'
 
 vi.mock('./client', async () => {
@@ -15,9 +15,11 @@ actEnvironment.IS_REACT_ACT_ENVIRONMENT = true
 notifyManager.setNotifyFunction(callback => { act(callback) })
 
 let dispose: (() => Promise<void>) | undefined
+beforeEach(() => { window.localStorage.clear() })
 afterEach(async () => {
   await dispose?.()
   dispose = undefined
+  window.localStorage.clear()
   window.history.pushState(null, '', '/')
 })
 
@@ -39,6 +41,7 @@ async function renderAt(url: string): Promise<HTMLElement> {
   await act(async () => {
     root.render(<QueryClientProvider client={client}><TradeJournalPage /></QueryClientProvider>)
   })
+  await vi.waitFor(() => expect(container.querySelector("#journal-panel")).not.toBeNull())
   return container
 }
 
@@ -74,7 +77,9 @@ it('点选交易者和栏目时写回地址栏，重复选择不新增历史', a
   const container = await renderAt(`/trade-journal?foo=1&tab=reviews&trader=${padded}#note`)
   const listen = vi.spyOn(window, 'addEventListener')
   expect(window.location.pathname).toBe('/trade-journal')
-  expect(window.location.search).toBe(`?foo=1&tab=reviews&trader=${padded}`)
+  expect(params().get('trader')).toBe('杨鹏')
+  expect(params().get('foo')).toBe('1')
+  expect(params().get('tab')).toBe('reviews')
   expect(window.location.hash).toBe('#note')
   expect(listen.mock.calls.some(call => call[0] === 'popstate')).toBe(false)
   listen.mockRestore()
@@ -90,7 +95,7 @@ it('点选交易者和栏目时写回地址栏，重复选择不新增历史', a
   await clickColumn(container, '交易记录')
   expect(params().get('foo')).toBe('1')
   expect(params().get('tab')).toBe('records')
-  expect(params().get('trader')).toBe(' 杨鹏 ')
+  expect(params().get('trader')).toBe('杨鹏')
   expect(window.location.hash).toBe('#note')
   expect(window.location.pathname).toBe('/trade-journal')
   expect(pushes).toHaveLength(1)
@@ -98,15 +103,15 @@ it('点选交易者和栏目时写回地址栏，重复选择不新增历史', a
   await clickColumn(container, '交易记录')
   expect(pushes).toHaveLength(1)
 
-  await clickTrader(container, '全部')
+  await clickTrader(container, 'AI选股:atr_pct')
   expect(params().get('tab')).toBe('records')
-  expect(params().get('trader')).toBeNull()
+  expect(params().get('trader')).toBe('AI选股:atr_pct')
   expect(params().get('foo')).toBe('1')
   expect(window.location.hash).toBe('#note')
   expect(container.querySelector('[aria-label="交易日记栏目"] [aria-selected="true"]')?.id).toBe('journal-tab-records')
   expect(pushes).toHaveLength(2)
 
-  await clickTrader(container, '全部')
+  await clickTrader(container, 'AI选股:atr_pct')
   expect(pushes).toHaveLength(2)
 
   await clickTrader(container, '杨鹏')
@@ -129,9 +134,10 @@ it('点选交易者和栏目时写回地址栏，重复选择不新增历史', a
   push.mockRestore()
 })
 
-it('没有栏目参数时选择全部删掉 trader 并写上当前栏目，保存后写入新栏目', async () => {
+it('没有栏目参数时选择另一交易者并写上当前栏目，保存后写入新栏目', async () => {
   const container = await renderAt('/trade-journal?trader=%E6%9D%A8%E9%B9%8F&foo=1#note')
-  expect(window.location.search).toBe('?trader=%E6%9D%A8%E9%B9%8F&foo=1')
+  expect(params().get('trader')).toBe('杨鹏')
+  expect(params().get('foo')).toBe('1')
   await vi.waitFor(() => expect(traderButtons(container).some(button => traderName(button) === '杨鹏' && button.getAttribute('aria-selected') === 'true')).toBe(true))
 
   const pushes: string[] = []
@@ -141,8 +147,8 @@ it('没有栏目参数时选择全部删掉 trader 并写上当前栏目，保�
     nativePush.call(this, data, unused, url)
   })
 
-  await clickTrader(container, '全部')
-  expect(params().get('trader')).toBeNull()
+  await clickTrader(container, 'AI选股:atr_pct')
+  expect(params().get('trader')).toBe('AI选股:atr_pct')
   expect(params().get('tab')).toBe('positions')
   expect(params().get('foo')).toBe('1')
   expect(window.location.hash).toBe('#note')
@@ -150,7 +156,7 @@ it('没有栏目参数时选择全部删掉 trader 并写上当前栏目，保�
 
   await clickColumn(container, '历史收益')
   expect(params().get('tab')).toBe('history')
-  expect(params().get('trader')).toBeNull()
+  expect(params().get('trader')).toBe('AI选股:atr_pct')
   expect(params().get('foo')).toBe('1')
 
   await clickTrader(container, '杨鹏')
@@ -193,7 +199,8 @@ it('没有栏目参数时选择全部删掉 trader 并写上当前栏目，保�
   const writeReview = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('写复盘'))
   await act(async () => writeReview!.click())
   await act(async () => {
-    setControl(container.querySelector<HTMLInputElement>('[aria-label="复盘交易者"]')!, '杨鹏')
+    expect(container.querySelector<HTMLInputElement>('[aria-label="复盘交易者"]')?.value).toBe('杨鹏')
+    expect(container.querySelector<HTMLInputElement>('[aria-label="复盘交易者"]')?.readOnly).toBe(true)
     setControl(container.querySelector<HTMLTextAreaElement>('[aria-label="复盘内容"]')!, '收盘复盘')
   })
   const saveReview = Array.from(container.querySelectorAll('button')).find(button => button.textContent === '保存复盘')

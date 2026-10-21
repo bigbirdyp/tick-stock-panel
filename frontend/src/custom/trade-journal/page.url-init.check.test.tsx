@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, notifyManager } from '@tanstack/react-query'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TradeJournalPage } from './page'
 
 type Calls = { positions: unknown[]; history: unknown[]; records: unknown[]; reviews: unknown[] }
@@ -34,9 +34,11 @@ function calls(): Calls {
 }
 
 let dispose: (() => Promise<void>) | undefined
+beforeEach(() => { window.localStorage.clear() })
 afterEach(async () => {
   await dispose?.()
   dispose = undefined
+  window.localStorage.clear()
   window.history.pushState(null, '', '/')
   for (const bucket of Object.values(calls())) bucket.length = 0
 })
@@ -55,6 +57,7 @@ async function renderAt(search: string) {
   await act(async () => {
     root.render(<QueryClientProvider client={client}><TradeJournalPage /></QueryClientProvider>)
   })
+  await vi.waitFor(() => expect(container.querySelector("#journal-panel")).not.toBeNull())
   return container
 }
 
@@ -62,26 +65,26 @@ function selectedTab(container: HTMLElement, label: string) {
   return container.querySelector<HTMLButtonElement>(`[aria-label="${label}"] [aria-selected="true"]`)
 }
 
-it('缺省和非法地址打开持仓与全部', async () => {
+it('缺省和非法地址打开首位真实交易者持仓', async () => {
   const blank = await renderAt('')
-  expect(window.location.search).toBe('')
+  expect(new URLSearchParams(window.location.search).get('trader')).toBe('杨鹏')
   expect(selectedTab(blank, '交易日记栏目')?.textContent).toContain('当前持仓')
-  expect(selectedTab(blank, '交易者')?.textContent).toContain('全部')
+  expect(selectedTab(blank, '交易者')?.textContent).toContain('杨鹏')
   expect(calls().positions.at(-1)).toMatchObject({ limit: 20, offset: 0, sort: 'symbol_asc' })
-  expect(calls().positions.at(-1)).not.toHaveProperty('trader')
+  expect(calls().positions.at(-1)).toHaveProperty('trader', '杨鹏')
   await dispose?.()
   dispose = undefined
 
   const invalid = await renderAt('?tab=nope&trader=%20%20')
-  expect(window.location.search).toBe('?tab=nope&trader=%20%20')
+  expect(new URLSearchParams(window.location.search).get('trader')).toBe('杨鹏')
   expect(selectedTab(invalid, '交易日记栏目')?.textContent).toContain('当前持仓')
-  expect(selectedTab(invalid, '交易者')?.textContent).toContain('全部')
-  expect(calls().positions.at(-1)).not.toHaveProperty('trader')
+  expect(selectedTab(invalid, '交易者')?.textContent).toContain('杨鹏')
+  expect(calls().positions.at(-1)).toHaveProperty('trader', '杨鹏')
 })
 
 it('用地址栏初始化栏目、交易者和三条查询，复盘查询带上交易者', async () => {
   const container = await renderAt(`?tab=reviews&trader=${encodeURIComponent(' 杨鹏 ')}`)
-  expect(window.location.search).toBe(`?tab=reviews&trader=${encodeURIComponent(' 杨鹏 ')}`)
+  expect(new URLSearchParams(window.location.search).get('trader')).toBe('杨鹏')
   expect(selectedTab(container, '交易日记栏目')?.id).toBe('journal-tab-reviews')
   await vi.waitFor(() => expect(selectedTab(container, '交易者')?.textContent).toContain('杨鹏'))
   expect(calls().reviews.at(-1)).toMatchObject({ trader: '杨鹏', offset: 0 })
@@ -92,7 +95,7 @@ it('用地址栏初始化栏目、交易者和三条查询，复盘查询带上�
   await act(async () => recordsTab?.click())
   const recordsParams = new URLSearchParams(window.location.search)
   expect(recordsParams.get('tab')).toBe('records')
-  expect(recordsParams.get('trader')).toBe(' 杨鹏 ')
+  expect(recordsParams.get('trader')).toBe('杨鹏')
   expect(selectedTab(container, '交易日记栏目')?.id).toBe('journal-tab-records')
   expect(calls().records.at(-1)).toMatchObject({ trader: '杨鹏', offset: 0 })
 
@@ -100,7 +103,7 @@ it('用地址栏初始化栏目、交易者和三条查询，复盘查询带上�
   await act(async () => historyTab?.click())
   const historyParams = new URLSearchParams(window.location.search)
   expect(historyParams.get('tab')).toBe('history')
-  expect(historyParams.get('trader')).toBe(' 杨鹏 ')
+  expect(historyParams.get('trader')).toBe('杨鹏')
   expect(calls().history.at(-1)).toMatchObject({ trader: '杨鹏', offset: 0 })
 })
 
@@ -127,14 +130,14 @@ it('刷新后仍按地址栏恢复栏目和交易者', async () => {
   expect(calls().positions).toEqual([])
 })
 
-it('名册里没有的交易者从地址栏清掉，栏目和其它参数保留', async () => {
+it('名册里没有的交易者回退首位真实交易者，栏目和其它参数保留', async () => {
   const before = window.history.length
   const container = await renderAt(`?tab=reviews&trader=${encodeURIComponent('已离开')}&foo=1#note`)
   expect(selectedTab(container, '交易日记栏目')?.id).toBe('journal-tab-reviews')
   await vi.waitFor(() => {
-    expect(new URLSearchParams(window.location.search).has('trader')).toBe(false)
-    expect(calls().reviews.at(-1)).not.toHaveProperty('trader')
-    expect(selectedTab(container, '交易者')?.textContent).toContain('全部')
+    expect(new URLSearchParams(window.location.search).get('trader')).toBe('杨鹏')
+    expect(calls().reviews.at(-1)).toHaveProperty('trader', '杨鹏')
+    expect(selectedTab(container, '交易者')?.textContent).toContain('杨鹏')
   })
   const cleaned = new URLSearchParams(window.location.search)
   expect(cleaned.get('tab')).toBe('reviews')
