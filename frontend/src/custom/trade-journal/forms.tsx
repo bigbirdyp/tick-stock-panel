@@ -39,14 +39,15 @@ function ErrorMessage({ error }: { error: unknown }) {
 
 interface RecordFormProps {
   record: TradeRecord | null
-  /** 当前已选交易者。仅作新建预填，不代替用户确认，也不使用「未指定」。 */
+  /** 非空时锁定为当前交易员：展示该名称且只读，提交也固定为该值。空字符串表示还没有交易员，可以填写新名称。 */
   defaultTrader?: string
   onClose: () => void
   onSave: (body: RecordWrite, original: TradeRecord | null) => Promise<ApiSuccess<TradeRecord>>
 }
 
 export function RecordForm({ record, defaultTrader = '', onClose, onSave }: RecordFormProps) {
-  const [trader, setTrader] = useState(record?.trader ?? defaultTrader)
+  const traderLocked = defaultTrader !== ''
+  const [trader, setTrader] = useState(traderLocked ? defaultTrader : (record?.trader ?? ''))
   const [date, setDate] = useState(record?.trade_date ?? shanghaiToday())
   const [time, setTime] = useState(record?.trade_time ?? '')
   const [code, setCode] = useState(record?.code ?? '')
@@ -71,7 +72,7 @@ export function RecordForm({ record, defaultTrader = '', onClose, onSave }: Reco
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (pending) return
-    const traderResult = normalizeTrader(trader)
+    const traderResult = normalizeTrader(traderLocked ? defaultTrader : trader)
     if (!traderResult.ok) {
       setError(new TradeJournalError(traderResult.issue.status, traderResult.issue.code, traderResult.issue.message, traderResult.issue.fields))
       return
@@ -107,7 +108,7 @@ export function RecordForm({ record, defaultTrader = '', onClose, onSave }: Reco
           {record && <span className="text-xs text-muted">版本 {record.version}</span>}
         </div>
         <label className="block space-y-1 text-xs text-secondary">交易者
-          <input className={inputClass} aria-label="交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" value={trader} onChange={e => changed(setTrader, e.target.value)} />
+          <input className={inputClass} aria-label="交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" readOnly={traderLocked} value={traderLocked ? defaultTrader : trader} onChange={e => { if (traderLocked) return; changed(setTrader, e.target.value) }} />
         </label>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1 text-xs text-secondary">交易日期
@@ -155,14 +156,15 @@ export function RecordForm({ record, defaultTrader = '', onClose, onSave }: Reco
 
 interface ReviewFormProps {
   review: DailyReview | null
-  /** 当前已选交易者。仅作新建预填；「全部」不预填，必须手填。 */
+  /** 非空时锁定为当前交易员：展示该名称且只读，提交也固定为该值。空字符串表示还没有交易员，可以填写新名称。 */
   defaultTrader?: string
   onClose: () => void
   onSave: (body: ReviewWrite, original: DailyReview | null) => Promise<ApiSuccess<DailyReview>>
 }
 
 export function ReviewForm({ review, defaultTrader = '', onClose, onSave }: ReviewFormProps) {
-  const [trader, setTrader] = useState(review?.trader ?? defaultTrader)
+  const traderLocked = defaultTrader !== ''
+  const [trader, setTrader] = useState(traderLocked ? defaultTrader : (review?.trader ?? ''))
   const [date, setDate] = useState(review?.date ?? shanghaiToday())
   const [content, setContent] = useState(review?.content ?? '')
   const [tagsText, setTagsText] = useState(review?.tags.join('，') ?? '')
@@ -172,7 +174,7 @@ export function ReviewForm({ review, defaultTrader = '', onClose, onSave }: Revi
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (pending) return
-    const traderResult = normalizeTrader(trader)
+    const traderResult = normalizeTrader(traderLocked ? defaultTrader : trader)
     if (!traderResult.ok) {
       setError(new TradeJournalError(traderResult.issue.status, traderResult.issue.code, traderResult.issue.message, traderResult.issue.fields))
       return
@@ -195,7 +197,7 @@ export function ReviewForm({ review, defaultTrader = '', onClose, onSave }: Revi
           {review && <span className="text-xs text-muted">版本 {review.version}</span>}
         </div>
         <label className="block space-y-1 text-xs text-secondary">交易者
-          <input className={inputClass} aria-label="复盘交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" value={trader} onChange={e => { setTrader(e.target.value); setError(null) }} />
+          <input className={inputClass} aria-label="复盘交易者" aria-invalid={traderInvalid(error)} required maxLength={64} autoComplete="off" placeholder="策略名或人名" readOnly={traderLocked} value={traderLocked ? defaultTrader : trader} onChange={e => { if (traderLocked) return; setTrader(e.target.value); setError(null) }} />
         </label>
         <label className="block space-y-1 text-xs text-secondary">复盘日期
           <input className={inputClass} aria-label="复盘日期" type="date" required value={date} onChange={e => { setDate(e.target.value); setError(null) }} />
