@@ -1184,6 +1184,8 @@ export function EChartsCandlestick({
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
+  const appliedCategoryDatesRef = useRef<string[]>([])
+  const dateIndexMapRef = useRef<Map<string, number>>(new Map())
   const dataRef = useRef(data)
   dataRef.current = data
   const onDateClickRef = useRef(onDateClick)
@@ -1267,6 +1269,7 @@ export function EChartsCandlestick({
     dates.forEach((d, i) => m.set(d, i))
     return m
   }, [dates])
+  dateIndexMapRef.current = dateIndexMap
 
   // dataZoom 初始范围: 'all' = 显示整段数据, 否则取末尾 visibleBars 根
   const initialZoom = useMemo(() => {
@@ -1400,10 +1403,16 @@ export function EChartsCandlestick({
       let foundIdx = -1
       if (axesInfo) {
         for (const info of Object.values(axesInfo)) {
-          const val = (info as any)?.value
-          if (val == null) continue
-          const idx = typeof val === 'number' ? val : d.findIndex(x => x.date === val)
-          if (idx >= 0 && idx < d.length) { foundIdx = idx; break }
+          const axis = info as { axisDim?: string; value?: unknown }
+          if (axis?.axisDim !== 'x') continue
+          const val = axis.value
+          // Ordinals belong to the categories already applied to ECharts, which can
+          // briefly precede the latest rows while a data refresh awaits its effect.
+          const date = typeof val === 'number'
+            ? (Number.isInteger(val) && val >= 0 ? appliedCategoryDatesRef.current[val] : undefined)
+            : typeof val === 'string' ? val : undefined
+          const idx = date == null ? undefined : dateIndexMapRef.current.get(date)
+          if (idx != null && idx >= 0 && idx < d.length) { foundIdx = idx; break }
         }
       }
       if (foundIdx < 0) return
@@ -1519,6 +1528,8 @@ export function EChartsCandlestick({
       addedDate,
     )
 
+    // Publish before setOption: it may synchronously emit updateAxisPointer.
+    appliedCategoryDatesRef.current = dates
     chart.setOption(option, true)
 
     // 恢复用户缩放位置

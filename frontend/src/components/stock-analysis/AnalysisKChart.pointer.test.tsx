@@ -200,3 +200,26 @@ it('无交易标记时挂载即绑定，数据更新不重绑，卸载后 wheel 
   expect(after.zrX).toBeUndefined()
   expect([after.offsetX, after.offsetY]).toEqual([270, 180])
 })
+
+
+it('布林预热空值、额外历史与日期缺口保持主副图日期对齐并保留零值', async () => {
+  const dates = ['2024-04-01', '2024-04-02', '2024-04-03', '2024-04-04']
+  await act(async () => root.render(
+    <AnalysisKChart
+      rows={dates.map((date, index) => row(date, 10 + index))}
+      defaultLevelTypes={['boll']}
+      seriesDates={['2024-03-29', '2024-04-01', '2024-04-02', '2024-04-04']}
+      series={{ boll: { upper: [999, null, 12, 0], lower: [998, null, 8, 0] } }}
+      height={460}
+    />,
+  ))
+  const option = harness.chart.setOption.mock.calls.at(-1)?.[0] as {
+    xAxis: Array<{ data: string[] }>
+    series: Array<{ name: string; data: Array<number | string> }>
+  }
+  expect(option.xAxis).toHaveLength(2)
+  expect(option.xAxis[0].data).toEqual(dates)
+  expect(option.xAxis[1].data).toEqual(dates)
+  expect(option.series.find(series => series.name === '布林上轨')?.data).toEqual(['-', 12, '-', 0])
+  expect(option.series.find(series => series.name === '布林下轨')?.data).toEqual(['-', 8, '-', 0])
+})

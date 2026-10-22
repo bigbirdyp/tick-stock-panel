@@ -89,7 +89,7 @@ function lastMarkPoint(): string {
 
 /** 模拟竖虚线命中某根 K 线 (鼠标在数据区内移动时 echarts 派发的事件) */
 async function hoverCandle(index: number) {
-  await act(async () => { chart.handlers.updateAxisPointer?.({ axesInfo: [{ value: index }] }) })
+  await act(async () => { chart.handlers.updateAxisPointer?.({ axesInfo: [{ axisDim: 'x', axisIndex: 0, value: index }] }) })
 }
 
 it('切标的后响应 dataZoom 仍用当前标的的买卖标记, 不回退到上一只', async () => {
@@ -649,4 +649,85 @@ it('无交易标记时 90% 与 100% 页面缩放仍按容器比例换算悬停�
     expect(listener.mock.results.at(-1)?.value, scale.name).toEqual(scale.expected)
     expect([native.offsetX, native.offsetY], scale.name).toEqual([270, 180])
   }
+})
+
+
+it('悬停只读取 x 轴日期，忽略 y 轴与无效序号并保留上次信息', async () => {
+  const data = datedRows(WINDOW_DATES.slice(0, 5)).map((item, index) => ({
+    ...item, open: 20 + index, high: 30 + index, low: 10 + index, close: 25 + index,
+  }))
+  await act(async () => root.render(
+    <EChartsCandlestick data={data} symbol="600000" height={400} visibleBars="all" />,
+  ))
+  await act(async () => chart.handlers.updateAxisPointer?.({ axesInfo: [
+    { axisDim: 'y', axisIndex: 0, value: 1 },
+    { axisDim: 'x', axisIndex: 1, value: 3 },
+  ] }))
+  expect(host.textContent).toContain('2024-04-04')
+  expect(host.textContent).toContain('开23.00高33.00低13.00收28.00')
+  const previous = host.textContent
+  for (const axesInfo of [
+    [{ axisDim: 'y', value: 1 }],
+    [{ axisDim: 'x', value: -1 }],
+    [{ axisDim: 'x', value: 1.5 }],
+    [{ axisDim: 'x', value: 5 }],
+    [{ axisDim: 'x', value: Number.NaN }],
+    [{ axisDim: 'x', value: '2099-01-01' }],
+    [{ axisDim: 'x' }],
+    [],
+  ]) {
+    await act(async () => chart.handlers.updateAxisPointer?.({ axesInfo }))
+    expect(host.textContent).toBe(previous)
+  }
+  await act(async () => chart.handlers.updateAxisPointer?.({
+    axesInfo: [{ axisDim: 'x', axisIndex: 0, value: '2024-04-02' }],
+  }))
+  expect(host.textContent).toContain('2024-04-02')
+  expect(host.textContent).toContain('开21.00高31.00低11.00收26.00')
+})
+
+it('缩放后 x 轴绝对序号仍命中完整日期，不读取 dataIndexInside', async () => {
+  const data = datedRows(WINDOW_DATES).map((item, index) => ({
+    ...item, open: 100 + index, high: 120 + index, low: 90 + index, close: 110 + index,
+  }))
+  await act(async () => root.render(
+    <EChartsCandlestick data={data} symbol="600000" height={400} visibleBars="all" />,
+  ))
+  await fireZoom({ start: 60, end: 100, startValue: 6, endValue: 9 })
+  await act(async () => chart.handlers.updateAxisPointer?.({ axesInfo: [{
+    axisDim: 'x', axisIndex: 0, value: 7,
+    seriesDataIndices: [{ seriesIndex: 0, dataIndexInside: 1, dataIndex: 7 }],
+  }] }))
+  expect(host.textContent).toContain('2024-04-08')
+  expect(host.textContent).toContain('开107.00高127.00低97.00收117.00')
+  expect(host.textContent).toContain('周期 3')
+  expect(host.textContent).not.toContain('2024-04-02')
+})
+
+it('同标的追加与当日价格替换后，原悬停监听读取最新日期和价格', async () => {
+  const initial = datedRows(WINDOW_DATES.slice(0, 3))
+  const render = async (data: OHLC[]) => {
+    await act(async () => root.render(
+      <EChartsCandlestick data={data} symbol="600000" height={400} visibleBars="all" />,
+    ))
+  }
+  await render(initial)
+  const listener = chart.handlers.updateAxisPointer
+  const registrations = chart.on.mock.calls.filter(([name]) => name === 'updateAxisPointer').length
+  const appended = [...initial, { date: WINDOW_DATES[3], open: 41, high: 47, low: 39, close: 45, volume: 2 }]
+  await render(appended)
+  expect(chart.handlers.updateAxisPointer).toBe(listener)
+  expect(chart.on.mock.calls.filter(([name]) => name === 'updateAxisPointer')).toHaveLength(registrations)
+  await act(async () => listener({ axesInfo: [{ axisDim: 'x', axisIndex: 0, value: WINDOW_DATES[3] }] }))
+  expect(host.textContent).toContain('2024-04-04')
+  expect(host.textContent).toContain('开41.00高47.00低39.00收45.00')
+  expect(host.textContent).toContain('周期 1')
+  await act(async () => listener({ axesInfo: [{ axisDim: 'x', axisIndex: 0, value: WINDOW_DATES[1] }] }))
+  expect(host.textContent).toContain('2024-04-02')
+  expect(host.textContent).toContain('周期 3')
+  await render(appended.map((item, index) => index === 3 ? { ...item, close: 46 } : item))
+  await act(async () => listener({ axesInfo: [{ axisDim: 'x', axisIndex: 0, value: WINDOW_DATES[3] }] }))
+  expect(host.textContent).toContain('开41.00高47.00低39.00收46.00')
+  expect(host.textContent).toContain('周期 1')
+  expect(chart.handlers.updateAxisPointer).toBe(listener)
 })
