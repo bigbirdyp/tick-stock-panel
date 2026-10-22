@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
+import { bindEchartsPointer } from '@/lib/echartsPointer'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
@@ -368,6 +369,14 @@ export function AnalysisKChart({
       series,
     }
   }
+
+  // 只在挂载时绑定。必须写在下面的初始化 effect 之前，这样第一次提交里
+  // capture 监听早于 echarts.init。cleanup 不能放进随 rows/levels 重跑的 effect。
+  useEffect(() => {
+    const el = chartRef.current
+    if (!el) return
+    return bindEchartsPointer(el)
+  }, [])
 
   // 初始化 + 数据更新
   useEffect(() => {

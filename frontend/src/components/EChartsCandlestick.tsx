@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
+import { bindEchartsPointer } from '@/lib/echartsPointer'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 
@@ -1362,34 +1363,8 @@ export function EChartsCandlestick({
     const hoverEl = hoverSurfaceRef.current
     if (!el || !hoverEl) return
 
-    // html zoom 下 zrender 直接抄 offsetX/Y，会和 canvas 像素错位。
-    // capture 先于 zrender 写入 zrX/zrY；已有值会被保留。不含 wheel，避免漏掉 zrDelta。
-    const tradeCoordinateEvents = [
-      'mousemove',
-      'pointermove',
-      'mousedown',
-      'pointerdown',
-      'mouseup',
-      'pointerup',
-      'mouseout',
-      'pointerout',
-      'click',
-      'dblclick',
-      'contextmenu',
-    ] as const
-    const correctTradeCoordinates = (event: Event) => {
-      if (!(event instanceof MouseEvent)) return
-      const target = event.target
-      if (!(target instanceof HTMLCanvasElement)) return
-      const rect = target.getBoundingClientRect()
-      if (!(rect.width > 0) || !(rect.height > 0)) return
-      const patched = event as MouseEvent & { zrX?: number; zrY?: number }
-      patched.zrX = (event.clientX - rect.left) * target.clientWidth / rect.width
-      patched.zrY = (event.clientY - rect.top) * target.clientHeight / rect.height
-    }
-    for (const type of tradeCoordinateEvents) {
-      el.addEventListener(type, correctTradeCoordinates, true)
-    }
+    // 须早于 echarts.init：capture 阶段先写入 zrX/zrY，zrender 才会沿用容器坐标。
+    const unbindPointer = bindEchartsPointer(el)
 
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
@@ -1489,9 +1464,7 @@ export function EChartsCandlestick({
     ro.observe(el)
 
     return () => {
-      for (const type of tradeCoordinateEvents) {
-        el.removeEventListener(type, correctTradeCoordinates, true)
-      }
+      unbindPointer()
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
