@@ -1183,9 +1183,6 @@ export function EChartsCandlestick({
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
-  // 有逐笔且标记开启时才修正坐标。每轮渲染写 ref，切股或关闭标记后不再改事件。
-  const tradeCoordinatesRef = useRef(false)
-  tradeCoordinatesRef.current = showMarkersProp && (markers?.some(marker => markerTrades(marker) != null) ?? false)
   const dataRef = useRef(data)
   dataRef.current = data
   const onDateClickRef = useRef(onDateClick)
@@ -1381,7 +1378,6 @@ export function EChartsCandlestick({
       'contextmenu',
     ] as const
     const correctTradeCoordinates = (event: Event) => {
-      if (!tradeCoordinatesRef.current) return
       if (!(event instanceof MouseEvent)) return
       const target = event.target
       if (!(target instanceof HTMLCanvasElement)) return

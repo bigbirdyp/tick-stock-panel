@@ -553,7 +553,7 @@ it('同步可见窗口不会反复重建图表', async () => {
   expect(outsideNotice()).toBeNull()
 })
 
-it('页面缩放时成交标记悬停按容器比例归一化，切到无逐笔后不再改写同一事件', async () => {
+it('页面缩放时成交标记悬停按容器比例归一化，切到无逐笔后同一事件仍得到容器坐标', async () => {
   type ZoomMouseEvent = MouseEvent & { zrX?: number; zrY?: number }
 
   await renderChart('600000', [tradeMarker(DAYS[10], [{
@@ -601,5 +601,52 @@ it('页面缩放时成交标记悬停按容器比例归一化，切到无逐笔�
   canvas.dispatchEvent(native)
 
   expect(listener.mock.calls.at(-1)?.[0]).toBe(native)
-  expect(listener.mock.results.at(-1)?.value).toEqual([undefined, undefined])
+  expect(listener.mock.results.at(-1)?.value).toEqual([300, 200])
+})
+
+it('无交易标记时 90% 与 100% 页面缩放仍按容器比例换算悬停坐标', async () => {
+  type ZoomMouseEvent = MouseEvent & { zrX?: number; zrY?: number }
+
+  await renderChart('600000', [])
+
+  const container = host.firstElementChild!.firstElementChild!
+  const canvas = container.appendChild(document.createElement('canvas'))
+  const listener = vi.fn((event: ZoomMouseEvent) => [event.zrX, event.zrY])
+  canvas.addEventListener('mousemove', listener)
+
+  const scales = [
+    { name: '90%', width: 540, height: 360, expected: [300, 200] },
+    { name: '100%', width: 600, height: 400, expected: [270, 180] },
+  ] as const
+
+  for (const scale of scales) {
+    Object.defineProperties(canvas, {
+      clientWidth: { value: 600, configurable: true },
+      clientHeight: { value: 400, configurable: true },
+    })
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      width: scale.width,
+      height: scale.height,
+      right: 100 + scale.width,
+      bottom: 200 + scale.height,
+      x: 100,
+      y: 200,
+      toJSON() {},
+    } as DOMRect)
+
+    const native = new MouseEvent('mousemove', {
+      bubbles: true,
+      clientX: 370,
+      clientY: 380,
+    }) as ZoomMouseEvent
+    Object.defineProperty(native, 'offsetX', { value: 270 })
+    Object.defineProperty(native, 'offsetY', { value: 180 })
+    canvas.dispatchEvent(native)
+
+    expect(listener.mock.calls.at(-1)?.[0], scale.name).toBe(native)
+    expect(listener.mock.results.at(-1)?.value, scale.name).toEqual(scale.expected)
+    expect([native.offsetX, native.offsetY], scale.name).toEqual([270, 180])
+  }
 })
