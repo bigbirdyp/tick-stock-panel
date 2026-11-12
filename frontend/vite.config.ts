@@ -4,7 +4,7 @@ import path from 'node:path'
 
 const backendHost = process.env.BACKEND_HOST || '127.0.0.1'
 const proxyHost = ['0.0.0.0', '::'].includes(backendHost) ? '127.0.0.1' : backendHost
-const backendPort = process.env.BACKEND_PORT || '3018'
+const backendPort = '3018'
 const backendTarget = `http://${proxyHost}:${backendPort}`
 
 export default defineConfig({
@@ -24,12 +24,15 @@ export default defineConfig({
     host: '0.0.0.0',   // dev.sh / dev.ps1 会用 CLI --host 覆盖
     port: 3011,
     proxy: {
-      // dev 时 /api 转发到与启动脚本相同的 FastAPI 地址
+      // 所有 API（含交易日记）先经过 3018 的认证和路由。
       '/api': {
         target: backendTarget,
         // SSE 端点需要禁用缓冲
         configure: (proxy) => {
           proxy.on('proxyReq', (_proxyReq, req) => {
+            // FastAPI sees Vite's loopback connection. Preserve the real peer
+            // without trusting a client-supplied forwarding chain.
+            _proxyReq.setHeader('X-Forwarded-For', req.socket.remoteAddress || 'unknown')
             if (req.url?.includes('/stream')) {
               _proxyReq.setHeader('Accept', 'text/event-stream')
               _proxyReq.setHeader('Cache-Control', 'no-cache')

@@ -177,6 +177,14 @@ export function StockDailyKChart({
     ...(markers ?? []),
     ...(showLimitMarkers ? limitMarkers : []),
   ], [limitMarkers, markers, showLimitMarkers])
+  // 「异动」只收起涨跌停/炸板和没有逐笔的旧标记。非空 trades 的成交继续传给图表；
+  // 无成交时仍走原来的 showMarkers 总开关，避免 ECharts 把成交一起藏掉。
+  const chartMarkers = useMemo(() => {
+    if (showMarkers) return allMarkers
+    const filled = allMarkers.filter(marker => (marker.trades?.length ?? 0) > 0)
+    return filled.length > 0 ? filled : allMarkers
+  }, [allMarkers, showMarkers])
+  const chartShowMarkers = showMarkers || chartMarkers.some(marker => (marker.trades?.length ?? 0) > 0)
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -205,6 +213,16 @@ export function StockDailyKChart({
   const Chart = renderer === 'lightweight' ? LightweightDaily : EChartsCandlestick
 
   if (!symbol) return null
+
+  // 只有这次查询已经成功、并且 rows 本身就是空数组，才算空K。
+  // 加载中、失败、还没有结果都不能当成空成功；有原始行但转完都无效仍走格式异常。
+  // 空K没有任何可见日期，笔数按当前 markers 各组 trades 逐笔相加，不按标记条数，也不另存状态。
+  const rawRows = kline.data?.rows
+  const emptyKline = !kline.isLoading && !kline.isError && Array.isArray(rawRows) && rawRows.length === 0
+  const outsideTradeCount = (markers ?? []).reduce(
+    (total, marker) => total + (marker.trades?.length ?? 0),
+    0,
+  )
 
   return (
     <div className={className} style={{ minHeight: chartHeight }}>
@@ -301,17 +319,21 @@ export function StockDailyKChart({
       {!kline.isLoading && !kline.isError && (kline.data?.rows?.length ?? 0) > 0 && rows.length === 0 && (
         <div className="text-sm text-danger py-2">数据格式异常，请刷新页面</div>
       )}
+      {emptyKline && <div className="text-sm text-muted py-2">暂无日K数据</div>}
+      {emptyKline && outsideTradeCount > 0 && (
+        <div className="text-sm text-muted py-2">有 {outsideTradeCount} 笔交易不在当前区间</div>
+      )}
       {rows.length > 0 && (
         <Suspense fallback={<div className="flex items-center justify-center text-xs text-muted" style={{ height }}>正在加载图表…</div>}>
         <Chart
           data={rows}
-          markers={allMarkers}
+          markers={chartMarkers}
           ranges={ranges}
           priceLines={priceLines}
           height={chartHeight - (renderer === 'lightweight' ? CHART_LAYOUT.toolbar : 22)}
           showMA={showMA}
           showInfoBar={showInfoBar}
-          showMarkers={showMarkers}
+          showMarkers={chartShowMarkers}
           markerStyle={renderer === 'lightweight' ? markerStyle : undefined}
           stockInfo={stockInfo}
           assetType={kline.data?.asset_type}

@@ -194,6 +194,9 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 3018
+    # 交易日志仅连接本机内部 Node 服务，不能配置任意上游地址。
+    trade_journal_port: int = Field(default=3022, ge=1, le=65535)
+    trade_journal_timeout_s: float = Field(default=10.0, gt=0, le=30)
     log_level: str = "INFO"
     backtest_range_guard: bool = False
     backtest_matrix_disk_cache_enabled: bool = True
@@ -245,6 +248,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
         """Docker 相对路径按应用目录解析；源码、桌面和绝对路径契约不变。"""
+        if self.trade_journal_port == self.port:
+            raise ValueError("trade_journal_port must differ from the FastAPI port")
         self.data_dir = _resolve_data_dir(self.data_dir)
         if self.backtest_matrix_cache_max_mb <= 0:
             raise ValueError("backtest_matrix_cache_max_mb must be positive")

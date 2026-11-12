@@ -4,6 +4,8 @@
 
 涉及代码二次开发、前端插槽、后端可替换策略、扩展注册或上游升级兼容时，还必须阅读 [`docs/secondary-development.md`](docs/secondary-development.md)。该文档区分当前已实现能力与目标扩展契约；不得根据设计示例虚构尚不存在的 API。
 
+新增功能前，先查看 [`docs/project-consensus.md`](docs/project-consensus.md) 中的跨层检查项和本次审阅发现；其中的实现状态以当前代码和测试为准。
+
 同时遵守以下规则：
 
 - 先理解调用链和现有测试，再进行修改。

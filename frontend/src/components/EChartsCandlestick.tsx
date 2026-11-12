@@ -1,12 +1,16 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct, pricePrecision } from '@/lib/format'
+import { bindEchartsPointer } from '@/lib/echartsPointer'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 
-import type { OHLC, ChartMarker, ChartRange, ChartPriceLine, VolumeCompareConfig, DailyChartProps } from '@/lib/chart-types'
-export type { OHLC, ChartMarker, ChartRange, ChartPriceLine, StockInfo, VolumeCompareConfig } from '@/lib/chart-types'
+import type { ChartMarker, ChartPriceLine, ChartRange, ChartTradeDetail, DailyChartProps, OHLC, VolumeCompareConfig } from '@/lib/chart-types'
+export type { ChartMarker, ChartPriceLine, ChartRange, ChartTradeDetail, OHLC, StockInfo, VolumeCompareConfig } from '@/lib/chart-types'
 import { volMaN, volumeRatioAt, SUB_CHART_META } from '@/lib/chart-indicators'
+
+const DEFAULT_ACTIVE_INDICATORS: string[] = []
+const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
 
 interface SubChartContext {
   compact: boolean
@@ -245,6 +249,326 @@ const CT = () => chartTheme(getTheme())
 
 /** 可见蜡烛超过此数量时，涨停/炸板标签切换为小圆点。 */
 const COMPACT_THRESHOLD = 60
+const MARKER_FONT = 'JetBrains Mono, monospace'
+
+function markerTrades(marker: ChartMarker): readonly ChartTradeDetail[] | null {
+  const trades = marker.trades
+  if (trades == null || trades.length === 0) return null
+  return trades
+}
+
+interface ZoomSlice {
+  start?: number
+  end?: number
+  startValue?: number | string
+  endValue?: number | string
+}
+
+function zoomSliceEqual(a: ZoomSlice | null, b: ZoomSlice | null): boolean {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  return a.start === b.start && a.end === b.end
+    && a.startValue === b.startValue && a.endValue === b.endValue
+}
+
+function readZoomSlice(zoom: ZoomSlice | null | undefined): ZoomSlice | null {
+  if (zoom == null) return null
+  const slice: ZoomSlice = {}
+  if (typeof zoom.start === 'number' && Number.isFinite(zoom.start)) slice.start = zoom.start
+  if (typeof zoom.end === 'number' && Number.isFinite(zoom.end)) slice.end = zoom.end
+  if (typeof zoom.startValue === 'number' && Number.isFinite(zoom.startValue)) slice.startValue = zoom.startValue
+  else if (typeof zoom.startValue === 'string' && zoom.startValue !== '') slice.startValue = zoom.startValue
+  if (typeof zoom.endValue === 'number' && Number.isFinite(zoom.endValue)) slice.endValue = zoom.endValue
+  else if (typeof zoom.endValue === 'string' && zoom.endValue !== '') slice.endValue = zoom.endValue
+  if (slice.start == null && slice.end == null && slice.startValue == null && slice.endValue == null) return null
+  return slice
+}
+
+function clampIndex(value: number, last: number): number {
+  return Math.min(last, Math.max(0, value))
+}
+
+/** 类别轴把 0–100 的百分比线性映到 [0, n-1]，再四舍五入到 K 线序号。 */
+function categoryIndexFromPercent(percent: number, last: number): number {
+  if (last <= 0) return 0
+  if (percent <= 0) return 0
+  if (percent >= 100) return last
+  return clampIndex(Math.round((percent / 100) * last), last)
+}
+
+function categoryIndexFromValue(value: number | string, dates: readonly string[]): number {
+  const last = dates.length - 1
+  if (typeof value === 'number') return clampIndex(Math.round(value), last)
+  const exact = dates.indexOf(value)
+  if (exact >= 0) return exact
+  let insert = 0
+  while (insert < dates.length && dates[insert] < value) insert++
+  return clampIndex(insert, last)
+}
+
+/**
+ * 当前 dataZoom 里真实存在的 K 线日期。
+ * 有 startValue/endValue 时用类别序号或日期；只有百分比时按类别轴映射并夹紧。
+ * 停牌日和数据里没有的日期不会进入这个集合。
+ */
+function visibleKlineDates(
+  dates: readonly string[],
+  zoom: ZoomSlice | null,
+  fallback: { start: number; end: number },
+): Set<string> {
+  const visible = new Set<string>()
+  const last = dates.length - 1
+  if (last < 0) return visible
+  const hasValue = zoom != null && zoom.startValue != null && zoom.endValue != null
+  let startIndex = hasValue
+    ? categoryIndexFromValue(zoom.startValue as number | string, dates)
+    : categoryIndexFromPercent(
+      typeof zoom?.start === 'number' ? zoom.start : fallback.start,
+      last,
+    )
+  let endIndex = hasValue
+    ? categoryIndexFromValue(zoom.endValue as number | string, dates)
+    : categoryIndexFromPercent(
+      typeof zoom?.end === 'number' ? zoom.end : fallback.end,
+      last,
+    )
+  if (startIndex > endIndex) {
+    const swap = startIndex
+    startIndex = endIndex
+    endIndex = swap
+  }
+  for (let index = startIndex; index <= endIndex; index++) visible.add(dates[index])
+  return visible
+}
+
+/** 可见日期以外的逐笔合计。markers 未就绪时返回 null，避免把加载失败说成 0。 */
+function countTradesOutsideWindow(
+  markers: readonly ChartMarker[] | undefined,
+  dates: readonly string[],
+  zoom: ZoomSlice | null,
+  fallback: { start: number; end: number },
+): number | null {
+  if (markers == null) return null
+  const visible = visibleKlineDates(dates, zoom, fallback)
+  let count = 0
+  for (const marker of markers) {
+    const trades = markerTrades(marker)
+    if (!trades) continue
+    if (!visible.has(marker.date)) count += trades.length
+  }
+  return count
+}
+
+/** 只看逐笔方向。没有买也没有卖时返回 null，调用方继续走旧标记。 */
+function tradeDirection(trades: readonly ChartTradeDetail[]): 'buy' | 'sell' | 'both' | null {
+  let buy = false
+  let sell = false
+  for (const trade of trades) {
+    if (trade.side === 'buy') buy = true
+    else if (trade.side === 'sell') sell = true
+    if (buy && sell) return 'both'
+  }
+  if (buy) return 'buy'
+  if (sell) return 'sell'
+  return null
+}
+
+/** chartTheme 没有实色画布背景，文字描边继续用现有深浅两色。 */
+function textHalo(): string {
+  return getTheme() === 'dark' ? '#18181B' : '#FFFFFF'
+}
+
+/** 成交价和数量按原始数值显示，不收成均价、区间或固定小数。 */
+function formatExactNumber(value: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return Object.is(value, -0) ? '0' : String(value)
+}
+
+function appendTooltipText(parent: HTMLElement, value: string, color?: string): void {
+  const span = document.createElement('span')
+  span.textContent = value
+  if (color) span.style.color = color
+  parent.appendChild(span)
+}
+
+/**
+ * 逐笔来自交易记录接口。用元素的 textContent 写入，避免 trader/date 被当成 HTML。
+ * 当天全部保留，靠最大高度滚动，不截断。
+ */
+function buildTradeTooltip(trades: readonly ChartTradeDetail[]): HTMLElement {
+  const root = document.createElement('div')
+  root.style.maxWidth = 'min(340px, calc(100vw - 24px))'
+  root.style.maxHeight = 'min(240px, 60vh)'
+  root.style.overflowY = 'auto'
+  root.style.overflowX = 'hidden'
+  root.style.boxSizing = 'border-box'
+  root.style.font = `12px/1.45 ${MARKER_FONT}`
+  root.style.color = CT().tooltipText
+  const header = document.createElement('div')
+  header.textContent = '日期 方向 价格 数量 交易员'
+  root.appendChild(header)
+  for (const trade of trades) {
+    const row = document.createElement('div')
+    row.style.display = 'flex'
+    row.style.flexWrap = 'wrap'
+    row.style.columnGap = '8px'
+    row.style.padding = '1px 0'
+    const sideLabel = trade.side === 'buy' ? '买' : trade.side === 'sell' ? '卖' : String(trade.side)
+    const sideColor = trade.side === 'buy' ? THEME.bull : trade.side === 'sell' ? THEME.bear : undefined
+    appendTooltipText(row, String(trade.date ?? ''))
+    appendTooltipText(row, sideLabel, sideColor)
+    appendTooltipText(row, `价 ${formatExactNumber(trade.price)}`)
+    appendTooltipText(row, `量 ${formatExactNumber(trade.quantity)}`)
+    appendTooltipText(row, typeof trade.trader === 'string' ? trade.trader : String(trade.trader ?? ''))
+    root.appendChild(row)
+  }
+  return root
+}
+
+function tradeTooltipOption(trades: readonly ChartTradeDetail[]) {
+  return {
+    trigger: 'item' as const,
+    show: true,
+    enterable: true,
+    confine: true,
+    hideDelay: 400,
+    backgroundColor: CT().tooltipBg,
+    borderColor: CT().tooltipBorder,
+    borderWidth: 1,
+    padding: [8, 10] as [number, number],
+    textStyle: { color: CT().tooltipText, fontSize: 12, fontFamily: MARKER_FONT },
+    extraCssText: 'box-shadow:none;max-width:min(360px,calc(100vw - 16px));',
+    formatter: () => buildTradeTooltip(trades),
+  }
+}
+
+/** 同一天买卖仍是一个 symbol：红上箭头和绿下箭头并列，文字各自着色。 */
+function dualTradeSymbol(): string {
+  const halo = textHalo()
+  const up = THEME.bull
+  const down = THEME.bear
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="22" viewBox="0 0 96 22">'
+    + `<path d="M4 15 L10 4 L16 15 M10 6 V17" fill="none" stroke="${up}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<text x="20" y="16" font-size="13" font-family="sans-serif" fill="${up}" stroke="${halo}" stroke-width="3" paint-order="stroke">买</text>`
+    + `<path d="M52 7 L58 18 L64 7 M58 16 V5" fill="none" stroke="${down}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `<text x="68" y="16" font-size="13" font-family="sans-serif" fill="${down}" stroke="${halo}" stroke-width="3" paint-order="stroke">卖</text>`
+    + '</svg>'
+  return `image://data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`
+}
+
+function legacyTradePoint(marker: ChartMarker, row: OHLC, isBuy: boolean, isSell: boolean) {
+  return {
+    name: marker.label ?? '',
+    coord: [marker.date, isBuy ? row.low : row.high],
+    symbol: 'arrow',
+    symbolSize: 12,
+    symbolRotate: isBuy ? 0 : 180,
+    symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+    itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+    label: {
+      show: !!marker.label,
+      formatter: marker.label ?? '',
+      position: isBuy ? 'bottom' : 'top',
+      distance: 8,
+      color: CT().text,
+      fontSize: 10,
+      fontFamily: MARKER_FONT,
+    },
+  }
+}
+
+function tradeDetailPoint(marker: ChartMarker, row: OHLC, trades: readonly ChartTradeDetail[]) {
+  const direction = tradeDirection(trades)
+  const tooltip = tradeTooltipOption(trades)
+  // 坐标只用这根 K 线的高/低。成交价是未复权原始价，不能拿来当图上的 y。
+  if (direction === 'both') {
+    return {
+      name: marker.label ?? '买/卖',
+      coord: [marker.date, row.high],
+      symbol: dualTradeSymbol(),
+      symbolSize: [96, 22],
+      symbolOffset: [0, '-70%'],
+      itemStyle: { color: 'transparent' },
+      label: { show: false },
+      tooltip,
+      z: 10,
+    }
+  }
+  if (direction == null) {
+    const isBuy = marker.kind === 'buy'
+    return { ...legacyTradePoint(marker, row, isBuy, marker.kind === 'sell'), tooltip }
+  }
+  const isBuy = direction === 'buy'
+  return {
+    name: marker.label ?? (isBuy ? '买' : '卖'),
+    coord: [marker.date, isBuy ? row.low : row.high],
+    symbol: 'arrow',
+    symbolSize: 12,
+    symbolRotate: isBuy ? 0 : 180,
+    symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+    itemStyle: { color: isBuy ? THEME.bull : THEME.bear },
+    label: {
+      show: true,
+      formatter: isBuy ? '买' : '卖',
+      position: isBuy ? 'bottom' : 'top',
+      distance: 8,
+      color: isBuy ? THEME.bull : THEME.bear,
+      fontSize: 10,
+      fontFamily: MARKER_FONT,
+      textBorderColor: textHalo(),
+      textBorderWidth: 2,
+    },
+    tooltip,
+    z: 10,
+  }
+}
+
+function buildMarkPointData(
+  markers: readonly ChartMarker[] | undefined,
+  data: readonly OHLC[],
+  dateIndexMap: Map<string, number>,
+  compact: boolean,
+): any[] {
+  const markPointData: any[] = []
+  if (!markers || markers.length === 0) return markPointData
+  for (const marker of markers) {
+    const idx = dateIndexMap.get(marker.date)
+    if (idx == null) continue
+    const row = data[idx]
+    if (!row) continue
+    const isBuy = marker.kind === 'buy'
+    const isSell = marker.kind === 'sell'
+    if (marker.above) {
+      const dotColor = marker.color ?? (isBuy ? '#FACC15' : CT().text)
+      if (compact) {
+        markPointData.push({
+          name: marker.date, coord: [marker.date, row.high],
+          symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
+          itemStyle: { color: dotColor, cursor: 'pointer' },
+          label: { show: false }, z: 100, zlevel: 10,
+        })
+      } else {
+        markPointData.push({
+          name: marker.date, coord: [marker.date, row.high],
+          symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
+          itemStyle: { color: 'transparent' },
+          label: {
+            show: true, formatter: marker.label ?? '', position: 'top', distance: 0,
+            color: dotColor, fontSize: 10, fontWeight: 'normal',
+            fontFamily: MARKER_FONT,
+          },
+          z: 100, zlevel: 10,
+        })
+      }
+    } else {
+      const trades = markerTrades(marker)
+      markPointData.push(trades
+        ? tradeDetailPoint(marker, row, trades)
+        : legacyTradePoint(marker, row, isBuy, isSell))
+    }
+  }
+  return markPointData
+}
 
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
@@ -369,55 +693,10 @@ function buildOption(
 
   const hasMA = showMA && data.some(d => d.ma5 != null || d.ma10 != null || d.ma20 != null || d.ma60 != null)
 
-  const markPointData: any[] = []
-  if (markers && markers.length > 0) {
-    for (const m of markers) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
-  }
+  const markPointData = buildMarkPointData(markers, data, dateIndexMap, compact)
+  // 根 tooltip 是 axis 时，轴指示器的 showTip 会盖掉 markPoint 的 item tooltip。
+  // 有逐笔才改成 item；十字线仍由 axisPointer.type=cross 画出。没有逐笔则保持原样。
+  const tradeTips = markers?.some(marker => markerTrades(marker) != null) ?? false
 
   // ====== 布局计算 ======
   const left = 60
@@ -720,7 +999,7 @@ function buildOption(
     animation: false,
     backgroundColor: THEME.bg,
     tooltip: {
-      trigger: 'axis',
+      trigger: tradeTips ? 'item' : 'axis',
       axisPointer: { type: 'cross', crossStyle: { color: CT().crosshair } },
       backgroundColor: 'transparent',
       borderWidth: 0,
@@ -771,14 +1050,16 @@ export function EChartsCandlestick({
   onDateClick,
   onPriceDoubleClick,
   visibleBars = 60,
-  activeIndicators = [],
-  volumeCompare = { enabled: true, days: 1 },
+  activeIndicators = DEFAULT_ACTIVE_INDICATORS,
+  volumeCompare = DEFAULT_VOLUME_COMPARE,
   addedDate,
 }: Props) {
   const digits = pricePrecision(assetType)
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
+  const appliedCategoryDatesRef = useRef<string[]>([])
+  const dateIndexMapRef = useRef<Map<string, number>>(new Map())
   const dataRef = useRef(data)
   dataRef.current = data
   const onDateClickRef = useRef(onDateClick)
@@ -792,6 +1073,15 @@ export function EChartsCandlestick({
   const infoIdxRef = useRef<number>(data.length - 1)
   const compactRef = useRef(false)
   const userZoomRef = useRef<{ start: number; end: number } | null>(null)
+  // 只把 dataZoom 窗口放进 React state。笔数在渲染时用当前 markers/日期现算。
+  // 切股或 K 线根数变化时，这一帧也不能读上一窗口，否则会先闪出旧区间的笔数。
+  const [outsideZoom, setOutsideZoom] = useState<ZoomSlice | null>(null)
+  const [zoomScope, setZoomScope] = useState({ symbol: _symbol, length: data.length })
+  const zoomScopeMatches = zoomScope.symbol === _symbol && zoomScope.length === data.length
+  if (!zoomScopeMatches) {
+    setZoomScope({ symbol: _symbol, length: data.length })
+    setOutsideZoom(null)
+  }
   // dataZoom 监听只在图表创建时注册一次, 直接调用会一直执行「创建那次渲染」的 updateCompactPresentation:
   // 它的 data/dateIndexMap/markers 停在旧标的, 会把上一只的买卖标记 merge 回新标的图上。
   // 与 dataRef/getInfoBarHTMLRef 同法, 经 ref 取最新一次渲染的函数。
@@ -853,6 +1143,7 @@ export function EChartsCandlestick({
     dates.forEach((d, i) => m.set(d, i))
     return m
   }, [dates])
+  dateIndexMapRef.current = dateIndexMap
 
   // dataZoom 初始范围: 'all' = 显示整段数据, 否则取末尾 visibleBars 根
   const initialZoom = useMemo(() => {
@@ -949,6 +1240,9 @@ export function EChartsCandlestick({
     const hoverEl = hoverSurfaceRef.current
     if (!el || !hoverEl) return
 
+    // 须早于 echarts.init：capture 阶段先写入 zrX/zrY，zrender 才会沿用容器坐标。
+    const unbindPointer = bindEchartsPointer(el)
+
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
 
@@ -983,10 +1277,16 @@ export function EChartsCandlestick({
       let foundIdx = -1
       if (axesInfo) {
         for (const info of Object.values(axesInfo)) {
-          const val = (info as any)?.value
-          if (val == null) continue
-          const idx = typeof val === 'number' ? val : d.findIndex(x => x.date === val)
-          if (idx >= 0 && idx < d.length) { foundIdx = idx; break }
+          const axis = info as { axisDim?: string; value?: unknown }
+          if (axis?.axisDim !== 'x') continue
+          const val = axis.value
+          // Ordinals belong to the categories already applied to ECharts, which can
+          // briefly precede the latest rows while a data refresh awaits its effect.
+          const date = typeof val === 'number'
+            ? (Number.isInteger(val) && val >= 0 ? appliedCategoryDatesRef.current[val] : undefined)
+            : typeof val === 'string' ? val : undefined
+          const idx = date == null ? undefined : dateIndexMapRef.current.get(date)
+          if (idx != null && idx >= 0 && idx < d.length) { foundIdx = idx; break }
         }
       }
       if (foundIdx < 0) return
@@ -1024,13 +1324,14 @@ export function EChartsCandlestick({
     }
     chart.getZr().on('dblclick', handlePriceDoubleClick)
 
-    // dataZoom → 只更新 ref，不触发 React re-render
-    // compact 变化时需要增量更新 markPoint
+    // dataZoom：紧凑态仍只增量改 markPoint。窗口写入 state 后由图下文字重渲染，不重建图表。
     chart.on('dataZoom', () => {
       const opt = chart.getOption() as any
       const zoom = opt?.dataZoom?.[0]
       if (!zoom) return
       userZoomRef.current = { start: zoom.start, end: zoom.end }
+      const slice = readZoomSlice(zoom)
+      if (slice) setOutsideZoom(prev => (zoomSliceEqual(prev, slice) ? prev : slice))
 
       const d = dataRef.current
       const total = d.length
@@ -1046,6 +1347,7 @@ export function EChartsCandlestick({
     ro.observe(el)
 
     return () => {
+      unbindPointer()
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
@@ -1065,52 +1367,7 @@ export function EChartsCandlestick({
     const mkrs = showMarkersProp ? markers : undefined
     const compact = compactRef.current
     const seriesUpdates: any[] = []
-    const markPointData: any[] = []
-    for (const m of mkrs ?? []) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
+    const markPointData = buildMarkPointData(mkrs, data, dateIndexMap, compact)
     if (mkrs?.length) {
       seriesUpdates.push({
         name: 'K',
@@ -1146,6 +1403,8 @@ export function EChartsCandlestick({
       digits,
     )
 
+    // Publish before setOption: it may synchronously emit updateAxisPointer.
+    appliedCategoryDatesRef.current = dates
     chart.setOption(option, true)
 
     // 恢复用户缩放位置
@@ -1155,6 +1414,8 @@ export function EChartsCandlestick({
     } else {
       chart.dispatchAction({ type: 'dataZoom', start: initialZoom.start, end: initialZoom.end })
     }
+    const applied = readZoomSlice((chart.getOption() as { dataZoom?: ZoomSlice[] } | undefined)?.dataZoom?.[0])
+    if (applied) setOutsideZoom(prev => (zoomSliceEqual(prev, applied) ? prev : applied))
 
     // 初始信息栏
     const infoEl = infoBarRef.current
@@ -1207,6 +1468,13 @@ export function EChartsCandlestick({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const outsideTradeCount = countTradesOutsideWindow(
+    markers,
+    dates,
+    zoomScopeMatches ? outsideZoom : null,
+    initialZoom,
+  )
+
   return (
     <div ref={hoverSurfaceRef} className="w-full">
       {/* 主图信息栏 — 内容由 JS 直接操作 innerHTML */}
@@ -1217,6 +1485,11 @@ export function EChartsCandlestick({
 
       {/* ECharts canvas */}
       <div ref={containerRef} className="w-full" style={{ height: chartHeight }} />
+      {outsideTradeCount != null && outsideTradeCount > 0 && (
+        <div className="px-2 py-0.5 font-mono text-[11px] text-muted">
+          有 {outsideTradeCount} 笔交易不在当前区间
+        </div>
+      )}
     </div>
   )
 }

@@ -9,6 +9,7 @@ import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { fmtPct, cnDateFromUtc, fmtAssetPrice } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import type { ChartMarker } from '@/components/EChartsCandlestick'
 import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
@@ -43,6 +44,11 @@ export interface Props {
   navList?: NavItem[]
   /** 切股回调: 收到目标 symbol/name, 由调用方更新预览状态 */
   onNavigate?: (symbol: string, name?: string) => void
+  /**
+   * 可选日K日期箭头。不传时主图保持原样。
+   * 只按日期落在蜡烛上下方，不用成交价去画价格线。
+   */
+  markers?: ChartMarker[]
 }
 
 // ===== 板块标识（与 Screener 列表一致）=====
@@ -95,7 +101,7 @@ function fmtAbnormalCalcTime(asofSec: number): string {
 }
 
 
-export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate }: Props) {
+export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate, markers }: Props) {
   const [view, setView] = useState<PreviewView>('daily')
   const panelId = useId()
   const extensionTabs = getFrontendSlotRegistrations('stock-preview.tabs')
@@ -558,6 +564,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   prefetchSymbols={prefetchSymbols}
                   intradayDays={effectiveIntradayDays}
                   addedDate={addedDate}
+                  markers={markers}
                 />
               ) : view === 'intraday' ? (
                 <div className="flex min-w-0 flex-col gap-4">
