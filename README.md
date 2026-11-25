@@ -75,7 +75,7 @@
 | 策略、回测、监控各用一套工具,口径对不上      | 全站统一 **enriched 数据口径**:策略 → 回测 → 监控 → 复盘一条链                                           |
 | 盘中异动靠人盯盘,错过就是错过                | **竞价/盘中/偏移**全时段异动 + 实时弹窗、语音播报、飞书推送                                              |
 | 想查个数据要在几个页面之间来回点             | **AI 对话助手**:一句话问出全站数据,取数过程逐条可见、可展开核对;还能经确认卡放行生成信号、跑回测、补数据 |
-| 想基于面板数据做自己的工具/机器人,只能爬页面 | **开放接口 + MCP**:Token 六档权限、65 端点契约化、SSE 事件流,AI 客户端即插即用                           |
+| 想基于面板数据做自己的工具/机器人,只能爬页面 | **开放接口 + MCP**:Token 九项权限、76 端点契约化、SSE 事件流,AI 客户端即插即用                           |
 | 付费终端贵、云端平台数据出不了本地           | **自托管**:Docker 单容器,数据全部落在本地 Parquet,零运维                                                 |
 
 <a id="features"></a>
@@ -109,8 +109,8 @@
 
 | 模块 | 功能 |
 | :--- | :--- |
-| **🌐 开放接口** | Token 六档权限, 65 端点契约化, 读+写闭环 |
-| **🔌 MCP 服务器** | 12 个工具把面板能力交给任意 AI 客户端 |
+| **🌐 开放接口** | Token 九项权限, 76 端点契约化, 读+写闭环 |
+| **🔌 MCP 服务器** | 22 个工具把面板能力交给任意 AI 客户端 |
 | **🧠 AI 对话助手** | 一句话问全站数据, 工具足迹逐条可核对 |
 | **🧩 扩展页面** | 11 个官方页面单文件化, 删目录即卸载、复制即导入 |
 | **📦 页面插件** | 页面打包产物上传即挂载, 免重建宿主, 刷新生效 |
@@ -183,7 +183,7 @@
 | 🔁 **回测 = 实盘同路径** | 策略执行只此一条 `StrategyEngine.run`;分钟策略逐日回放 +「当日已知」纪律,杜绝未来函数 |
 | 🛡️ **稳健参数筛选** | 参数按 K 段折外稳健分(0.6×中位+0.4×最差)排名而非样本内得分:主目标白名单 + 最小交易数门槛 + Top-20 全窗退化率 + 冠军收敛/高原判据;滚动样本外检验每折重优化防过拟合,冠军/最新折参数一键应用到策略 |
 | 🛡️ **策略守护** | 发布的策略自动落基线,每日用新数据 K 段真实回测复验:退化自动判定 健康/观察/退役(交易数枯竭即退役),连续观察告警;退役只标记不删档,支持任意策略手动入护(尾随参考基线)。冠军按稳健分(中位+最差折)选出并做权重精调;健康冠军间低相关(日收益 Pearson≤0.7)可一键生成组合策略并入护;实验室战报聚合守护/挖掘/名额,挖掘名额满时新候选等位 |
-| 🏛️ **网关居中的开放单体** | 面板密码会话与 Token 网关双通道并行;65 端点契约快照 + CI 守护,SSE 事件流与 MCP 平等开放 |
+| 🏛️ **网关居中的开放单体** | 面板密码会话与 Token 网关双通道并行;76 端点契约快照 + CI 守护,SSE 事件流与 MCP 平等开放 |
 | 🚀 **重活进程隔离** | 回测跑在 spawn worker 子进程,刷新/切页重连不丢任务,主服务永不被计算卡住 |
 
 ### 核心域 / 扩展域边界
@@ -205,7 +205,7 @@
 | **财务多源合并**     | 按 `(symbol, period_end)` 报告期累积,多源取并集、逐列按公告日取最新(PIT);公告前一律空值,绝不填 0                                                                                                                         |
 | **非路由数据集直连** | 龙虎榜/盘前风向标/交易日历等 fuyao 专有能力不进路由矩阵,由独立服务直连消费——按日 JSON 缓存(历史不可变)、交易日回退、四态降级                                                                                             |
 | **回测执行隔离**     | 回测在 spawn worker 子进程运行,持久 run ID,刷新/切页重连不丢任务;子进程结果消息经锁保护回传                                                                                                                              |
-| **开放网关**         | Token 通道与面板密码会话并行互不影响:网络门禁(默认仅本机/内网, `API_TOKEN_LOCAL_ONLY=0` 放开) → 认证 → 六档 scope 校验 → 每 Token 滑动窗口限流(默认 120 次/分,O(1) 内存)→ 放行;管理面(数据同步/表结构/设置)永不开放给 Token                                                         |
+| **开放网关**         | Token 通道与面板密码会话并行互不影响:网络门禁(默认仅本机/内网, `API_TOKEN_LOCAL_ONLY=0` 放开) → 认证 → 九项 scope 校验 → 每 Token 滑动窗口限流(默认 120 次/分,O(1) 内存)→ 放行;管理面(数据同步/表结构/设置)永不开放给 Token                                                         |
 | **事件总线**         | 进程内发布/订阅(慢消费者丢旧保新,广播失败不反噬主流程),告警落盘唯一入口已挂接;SSE 流按票据 scope 过滤,票据一次性 60 秒过期                                                                                               |
 | **交易日探针**       | fuyao 交易日历(确定性,含调休)→ tickflow 全市场行情时间戳探针(OR 语义)→ 工作日兜底;节假日自动停掉实时轮询与分钟增量,零无效请求                                                                                            |
 | **扩展自动发现**     | 后端 `app/custom/<包>/` 启动时自动发现、注册独立路由(版本不符或 setup 失败即隔离跳过);前端 `src/custom/<ns>/extension.tsx` 单文件即完整扩展(组件+路由+导航),构建时自动挂载 —— 删除目录即整体卸载、复制目录即导入;运行时分发走**页面插件**(上传即挂载,免重建宿主) |
@@ -219,7 +219,7 @@
 | **回测**     | 自研仓位模拟引擎(T+1/费用/滑点/分钟回放)· vectorbt(部分路径)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | **数据源**   | [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方 SDK · fuyao(同花顺 REST) · [TdxQuant](https://help.tdx.com.cn/quant/)(通达信量化,实时/五档/日K/复权/分钟) · 插件化扩展(YAML 自定义源)                                                                                                                                                                                                                                                                                                                                                                              |
 | **AI**(可选) | ![OpenAI兼容](https://img.shields.io/badge/OpenAI兼容-412991?logo=openai&logoColor=white) Chat Completions 与 Responses 双协议 · DeepSeek / 通义 / Ollama 等 · 策略生成 / 报告 / **对话助手**(助手依赖工具调用能力, 需 OpenAI 兼容接口)                                                                                                                                                                                                                                                                                                     |
-| **MCP**      | [mcp-server](./mcp-server/README.md)(官方 SDK 2.x, stdio) — 12 工具按 scope 暴露,权限裁决复用开放网关                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **MCP**      | [mcp-server](./mcp-server/README.md)(官方 SDK 2.x, stdio) — 22 工具按 scope 暴露,权限裁决复用开放网关                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **前端**     | ![React 18](https://img.shields.io/badge/React_18-61DAFB?logo=react&logoColor=black) ![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![Tailwind](https://img.shields.io/badge/Tailwind-06B6D4?logo=tailwindcss&logoColor=white) Tanstack Query · [Lightweight Charts](https://www.tradingview.com/lightweight-charts/)(TradingView 开源) · ![ECharts](https://img.shields.io/badge/ECharts-AA344D?logo=apacheecharts&logoColor=white) · dnd-kit |
 | **部署**     | ![Docker](https://img.shields.io/badge/Docker_单容器-2496ED?logo=docker&logoColor=white) 两阶段构建,前端 dist 拷进后端镜像                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
@@ -247,12 +247,12 @@
 
 | 能力         | 表现                               | 靠什么                                       |
 | :----------- | :-------------------------------- | :------------------------------------------ |
-| 开放 API     | **65 端点** · 每 Token 120 次/分    | 进程内滑动窗口限流,O(1) 内存,零外部依赖    |
+| 开放 API     | **76 端点** · 每 Token 120 次/分    | 进程内滑动窗口限流,O(1) 内存,零外部依赖    |
 | 网关裁决     | 认证→scope→限流,纯内存单函数完成    | 单一裁决点(`evaluate`),无数据库往返        |
 | 契约稳定性   | 机器可读契约 + **快照测试**守护     | 开放面增删必须显式改快照,CI 拦截无意识变更 |
 | 数据写闭环   | 外部写入复用管理端同一校验/落盘路径 | `write:ext` 只写行数据,表结构锁死管理面    |
 | 事件推送     | 告警落盘即广播,**亚秒级**到 SSE 流  | 进程内事件总线(丢旧保新)+ 一次性票据订阅   |
-| MCP 工具调用 | 12 工具按 scope 联动暴露            | 薄桥零业务逻辑,权限裁决复用网关            |
+| MCP 工具调用 | 22 工具按 scope 联动暴露            | 薄桥零业务逻辑,权限裁决复用网关            |
 | 质量保障     | **3000+ 测试全绿,约 100 秒跑完**    | GitHub Actions CI(后端全量 + 前端构建)     |
 
 ---
@@ -269,7 +269,7 @@
 
 <table>
   <tr>
-    <td width="50%" align="center"><b>设置 → 开放接口 · Token 管理</b><br/><sub>明文只显示一次,六档 scope 按需授予</sub></td>
+    <td width="50%" align="center"><b>设置 → 开放接口 · Token 管理</b><br/><sub>明文只显示一次,九项 scope 按需授予</sub></td>
     <td width="50%" align="center"><b>设置 → 菜单设置 · 架构标注</b><br/><sub>每页核心/扩展徽标,悬停看归属原因</sub></td>
   </tr>
   <tr>
@@ -282,11 +282,11 @@
 | :-------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **API Token**   | `设置 → 开放接口` 创建,明文只显示一次,SHA-256 哈希存储,吊销立即生效                                                                                                            |
 | **网络门禁**    | Token 通道默认仅本机/内网调用,公网一律 403(`API_TOKEN_LOCAL_ONLY=0` 显式放开,远程推荐 SSH 隧道);门禁先于验签,不泄露 Token 有效性也不消耗限流额度                              |
-| **六档 scope**  | `read:market` / `read:ext` / `write:ext` / `read:analysis` / `run:backtest` / `paper:trade`,管理面永不开放给 Token                                                             |
-| **65 端点契约** | `GET /api/openapi.json?tier=a` 机器可读,Postman/代码生成即用;**契约快照测试 + CI 守护**,开放面变更必须显式确认                                                                 |
+| **九项 scope**  | `read:market` / `read:ext` / `write:ext` / `read:analysis` / `run:backtest` / `write:factor` / `run:mining` / `publish:strategy` / `paper:trade`,管理面永不开放给 Token                                                             |
+| **76 端点契约** | `GET /api/openapi.json?tier=a` 机器可读,Postman/代码生成即用;**契约快照测试 + CI 守护**,开放面变更必须显式确认                                                                 |
 | **数据写闭环**  | `write:ext` 程序化写入扩展表行数据(与内置数据同台分析),表结构锁死在管理面                                                                                                      |
 | **SSE 事件流**  | 60 秒一次性票据订阅实时告警推送,票据只继承 scope 不放大权限                                                                                                                    |
-| **MCP 服务器**  | 12 个精选工具,按 Token scope 暴露;模拟盘交易刻意不交给 AI                                                                                                                      |
+| **MCP 服务器**  | 22 个精选工具,按 Token scope 暴露;模拟盘交易刻意不交给 AI                                                                                                                      |
 | **示例与文档**  | [examples/open-api](./examples/open-api/README.md) 四个零依赖可运行示例 · [docs/features.md → 开放接口](./docs/features.md) · [开放平台设计方案](./docs/open-platform-plan.md) |
 
 > 开放接口面向**本部署的二次开发与本地工具集成**(自有页面、脚本、机器人、MCP 客户端),不作为数据对外分发通道;公网部署默认仅接受内网 Token 调用,详见 [configuration.md → 开放接口网络门禁](./docs/configuration.md#开放接口网络门禁默认仅本机内网)。

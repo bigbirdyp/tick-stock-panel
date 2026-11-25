@@ -315,7 +315,10 @@ def start_run(payload: MiningStartRequest, request: Request) -> dict[str, Any]:
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, request: Request) -> dict[str, Any]:
     store = _manager(request).store
-    return _project_run(store, _required_manifest(store, run_id))
+    run = _project_run(store, _required_manifest(store, run_id))
+    if run["error"] and request.headers.get("authorization", "").startswith("Bearer "):
+        run["error"] = run["error"].partition("\nTraceback (most recent call last):")[0]
+    return run
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -805,6 +808,7 @@ def _project_candidates(
             sharpe=row.get("oos_sharpe"),
             max_drawdown=row.get("oos_max_drawdown"),
             n_trades=row.get("oos_n_trades"),
+            worst_fold_sharpe=row.get("oos_worst_sharpe"),
         )
         candidate["gate"] = {
             "qualified": gate.qualified,

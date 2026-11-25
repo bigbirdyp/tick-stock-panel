@@ -503,6 +503,9 @@ def test_publish_factor_repairs_backlink_after_source_was_verified(
 ) -> None:
     store, run_id, signature = _create_run(tmp_path)
     service, _engine = _real_service(tmp_path, store)
+    # 首次发布用完最后一个名额。重试仍须修复同一策略的 backlink。
+    monkeypatch.setattr("app.services.preferences.get_guardian_schedule",
+                        lambda: {"lab_mined_slot_limit": 1})
     original = service._write_backlink
     calls = 0
 

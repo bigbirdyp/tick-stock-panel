@@ -133,8 +133,6 @@ class MiningCandidateService:
                     "candidate does not meet the promotion gate: "
                     + "; ".join(gate.reasons)
                 )
-            if definition["kind"] == "factor_rank":
-                self._enforce_mined_slot_limit()
             asset_type = self._asset_type(manifest)
             if definition["kind"] == "existing_strategy":
                 published_id = str(definition["strategy_id"])
@@ -738,6 +736,7 @@ class MiningCandidateService:
         if self.strategy_engine.has(strategy_id):
             raise ValueError(f"strategy ID already exists: {strategy_id}")
 
+        self._enforce_mined_slot_limit()
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         linked = False
         try:

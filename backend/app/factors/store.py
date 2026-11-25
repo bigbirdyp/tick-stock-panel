@@ -37,6 +37,11 @@ def load_all(data_dir: Path) -> list[dict]:
     return _STORE.load_all(data_dir)
 
 
+def definition_exists(data_dir: Path, factor_id: str) -> bool:
+    """调用方已通过 to_spec 校验 ID；未成功加载的旧文件也应保留。"""
+    return _STORE.path(data_dir, factor_id).exists()
+
+
 def save_one(data_dir: Path, definition: dict) -> None:
     _STORE.save_one(data_dir, definition)
 

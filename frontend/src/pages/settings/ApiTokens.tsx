@@ -11,8 +11,11 @@ const SCOPES: { key: string; label: string; desc: string; default: boolean }[] =
   { key: 'read:market', label: '行情读取', desc: '标的搜索 / 日K / 分时 / 指数 / 市场快照', default: true },
   { key: 'read:ext', label: '扩展数据读取', desc: '扩展表 rows / values / schema 查询', default: false },
   { key: 'write:ext', label: '扩展数据写入', desc: '向已配置的扩展表程序化写入行数据 (会进入策略/回测数据面, 谨慎授予)', default: false },
-  { key: 'read:analysis', label: '分析结果读取', desc: '策略清单与结果 / 回测报告 / 市场环境 / 告警', default: false },
+  { key: 'read:analysis', label: '分析结果读取', desc: '策略清单与结果 / 回测报告 / 挖掘进度与候选 / 市场环境 / 告警', default: false },
   { key: 'run:backtest', label: '触发回测', desc: '提交回测 / 策略 / 因子检验任务 (受并发约束)', default: false },
+  { key: 'write:factor', label: '创建因子', desc: '校验、试算公式并保存新因子', default: false },
+  { key: 'run:mining', label: '提交因子挖掘', desc: '按指定因子提交挖掘任务', default: false },
+  { key: 'publish:strategy', label: '发布挖掘策略', desc: '将通过样本外门槛的候选发布到策略库', default: false },
   { key: 'paper:trade', label: '模拟盘交易', desc: '模拟盘读取与下单/撤单 (写操作, 最高敏感)', default: false },
 ]
 

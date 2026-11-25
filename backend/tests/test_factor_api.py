@@ -409,3 +409,55 @@ def test_raw_price_is_available_in_trial_and_save(tmp_path, cleanup_registry):
     cleanup_registry.add("uf_raw_price")
     saved = client.post("/api/factors/custom", json={"id": "uf_raw_price", "label": "raw", "formula": "raw_close"})
     assert saved.status_code == 200
+
+
+def test_external_factor_create_preserves_existing_definition(tmp_path, cleanup_registry):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from app.factors import store
+    from app.factors.registry import get_factor
+
+    client = _client(with_engine=True)
+    client.app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    headers = {"Authorization": "Bearer test"}
+    factor_id = "uf_external_test"
+    cleanup_registry.add(factor_id)
+
+    def create(formula):
+        return client.post("/api/factors/custom", headers=headers, json={
+            "id": factor_id, "label": "测试", "formula": formula,
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(create, ["close", "-close"]))
+    assert sorted(res.status_code for res in responses) == [200, 409]
+    saved, = store.load_all(tmp_path)
+    assert saved["version"] == 1
+    expected = ["close", "-close"][next(i for i, r in enumerate(responses) if r.status_code == 200)]
+    assert saved["formula"] == get_factor(factor_id).formula_text == expected
+    assert create("close * 2").status_code == 409
+
+
+def test_external_factor_storage_failure_leaves_id_available(tmp_path, cleanup_registry, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.factors import store
+    from app.factors.registry import get_factor
+
+    client = _client(with_engine=True)
+    client.app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    factor_id = "uf_storage_test"
+    cleanup_registry.add(factor_id)
+
+    def unavailable(*_args):
+        raise OSError("write failed")
+
+    monkeypatch.setattr(store, "save_one", unavailable)
+    response = TestClient(client.app, raise_server_exceptions=False).post(
+        "/api/factors/custom", headers={"Authorization": "Bearer test"},
+        json={"id": factor_id, "label": "测试", "formula": "close"},
+    )
+    assert response.status_code == 500
+    assert get_factor(factor_id) is None
+    assert store.load_all(tmp_path) == []

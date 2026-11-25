@@ -18,6 +18,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+from starlette.routing import compile_path
+
 from app.services import api_tokens
 
 # (method, 路径前缀, scope) — method 用 "*" 表示任意; 顺序敏感, 具体规则在前
@@ -64,6 +66,20 @@ _RULES: list[tuple[str, str, str]] = [
     # SSE 流本体: 网关只做标记 (契约可见); 真正凭证是 query 里的票据,
     # 由端点内校验 (EventSource 带不了 Authorization 头)
     ("GET", "/api/events", "*"),
+]
+
+# 新增的研究操作逐条匹配完整路由，避免把 update、cancel、promote 等相邻操作一并授权。
+_FACTOR_RESEARCH_ROUTES = [
+    (method, compile_path(path)[0], scope)
+    for method, path, scope in (
+        ("POST", "/api/factors/validate", "write:factor"),
+        ("POST", "/api/factors/trial", "write:factor"),
+        ("POST", "/api/factors/custom", "write:factor"),
+        ("POST", "/api/backtest/mining/runs", "run:mining"),
+        ("GET", "/api/backtest/mining/runs/{run_id}", "read:analysis"),
+        ("GET", "/api/backtest/mining/runs/{run_id}/result", "read:analysis"),
+        ("POST", "/api/backtest/mining/runs/{run_id}/candidates/{signature}/publish", "publish:strategy"),
+    )
 ]
 
 # 后缀规则表 — 路径中段含动态段 (如 config_id), 前缀表表达不了"以 X 结尾"语义。
@@ -143,6 +159,9 @@ def required_scope(method: str, path: str) -> str | None:
 
     返回 "*" 表示仅需有效 Token (不做特定 scope 校验)。
     """
+    if path.startswith(("/api/factors/", "/api/backtest/mining/")):
+        return next((scope for m, route, scope in _FACTOR_RESEARCH_ROUTES
+                     if method == m and route.fullmatch(path)), None)
     for m, prefix, scope in _RULES:
         if (m == "*" or m == method) and (path == prefix or path.startswith(prefix.rstrip("/") + "/")):
             # read:ext 域内的拉取 Key 状态子路径属管理面 (脱敏也不外露)

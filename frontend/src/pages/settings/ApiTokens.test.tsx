@@ -131,3 +131,23 @@ it('keeps confirmation open during the request, shows failures and allows retry'
   expect(host.textContent).not.toContain('行情看板')
   expect(host.textContent).toContain('另一个服务')
 })
+
+it('issues a research token with only the explicitly selected scopes', async () => {
+  const create = vi.spyOn(api, 'apiTokenCreate').mockResolvedValue({ plaintext: 'test', token: tokens[0] })
+  await act(async () => root.render(<QueryClientProvider client={client}><SettingsApiTokensPanel /></QueryClientProvider>))
+  await tick()
+  await click(button('新建 Token'))
+  const grant = (scope: string) => [...host.querySelectorAll('label')]
+    .find(label => label.textContent?.includes(scope))!.querySelector('input')!
+  const research = ['read:analysis', 'write:factor', 'run:backtest', 'run:mining', 'publish:strategy']
+  for (const scope of research) expect(grant(scope).checked).toBe(false)
+  await click(grant('read:market'))
+  for (const scope of research) await click(grant(scope))
+  const name = host.querySelector<HTMLInputElement>('input[placeholder]')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(name, '研究 Agent')
+    name.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await click(button('创建'))
+  expect(create).toHaveBeenCalledWith('研究 Agent', research)
+})

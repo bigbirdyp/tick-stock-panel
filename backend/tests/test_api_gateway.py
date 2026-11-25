@@ -291,3 +291,37 @@ def test_token_gate_env_off_allows_public(
     # scope/限流链路照常工作: 无效 Token 仍 401
     bad = client.get("/api/kline/daily", headers={"Authorization": "Bearer tsp_bad"})
     assert bad.status_code == 401
+
+
+@pytest.mark.parametrize(("method", "path", "scope"), [
+    ("POST", "/api/factors/validate", "write:factor"),
+    ("POST", "/api/factors/trial", "write:factor"),
+    ("POST", "/api/factors/custom", "write:factor"),
+    ("POST", "/api/backtest/mining/runs", "run:mining"),
+    ("GET", "/api/backtest/mining/runs/r1", "read:analysis"),
+    ("GET", "/api/backtest/mining/runs/r1/result", "read:analysis"),
+    ("POST", "/api/backtest/mining/runs/r1/candidates/factor:uf_x|w:1|d:1/publish",
+     "publish:strategy"),
+])
+def test_external_agent_token_matrix(tmp_path, method, path, scope):
+    for grant in ["write:factor", "run:mining", "read:analysis", "run:backtest", "publish:strategy"]:
+        _, token = api_tokens.create_token(tmp_path, "agent", [grant])
+        verdict = api_gateway.evaluate(tmp_path, method, path, token)
+        assert verdict["status"] == (None if grant == scope else 403)
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("POST", "/api/factors/custom/uf_x/update"),
+    ("POST", "/api/factors/custom/uf_x/archive"),
+    ("DELETE", "/api/factors/custom/uf_x"),
+    ("POST", "/api/factors/composite"),
+    ("GET", "/api/backtest/mining/runs"),
+    ("POST", "/api/backtest/mining/runs/r1/cancel"),
+    ("POST", "/api/backtest/mining/runs/r1/candidates/abc/promote"),
+    ("GET", "/api/backtest/mining/runs/r1/events"),
+    ("POST", "/api/backtest/mining/auto"),
+    ("PATCH", "/api/backtest/mining/config"),
+    ("POST", "/api/backtest/mining/lock/force-release"),
+])
+def test_external_agent_neighbouring_routes_stay_private(method, path):
+    assert api_gateway.required_scope(method, path) is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import threading
 from collections.abc import Iterator
 
 import polars as pl
@@ -17,6 +18,7 @@ from app.factors.registry import (
     factor_dependencies,
     factor_warmup_bars,
     get_factor,
+    register_factor,
     unregister_factor,
 )
 from app.market_time import cn_today
@@ -274,6 +276,9 @@ def _trial_nonempty(request: Request, formula: str, asset_type: str = "stock") -
         raise HTTPException(status_code=400, detail="公式在最近 40 个交易日输出全为空, 拒绝保存")
 
 
+_CREATE_LOCK = threading.Lock()
+
+
 @router.post("/custom")
 def create_custom_factor(req: CustomFactorCreateRequest, request: Request) -> dict:
     """保存自定义公式因子: 编译通过 + 服务端试算非空 (fail-closed)。"""
@@ -282,7 +287,7 @@ def create_custom_factor(req: CustomFactorCreateRequest, request: Request) -> di
     definition = {
         "id": factor_id,
         "kind": "custom",
-        "version": _next_version(data_dir, factor_id),
+        "version": 1,
         "label": req.label,
         "group": req.group,
         "formula": req.formula,
@@ -298,11 +303,26 @@ def create_custom_factor(req: CustomFactorCreateRequest, request: Request) -> di
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _trial_nonempty(request, req.formula)
-    try:
-        store.register_definition(definition)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    store.save_one(data_dir, definition)
+    external = request.headers.get("authorization", "").startswith("Bearer ")
+    # 昂贵试算在锁外；并发创建同一 ID 只让首个 Token 请求写入。
+    with _CREATE_LOCK:
+        previous = get_factor(factor_id)
+        if external:
+            if previous is not None or store.definition_exists(data_dir, factor_id):
+                raise HTTPException(status_code=409, detail=f"因子 ID 已存在: {factor_id}")
+        else:
+            definition["version"] = _next_version(data_dir, factor_id)
+        try:
+            store.register_definition(definition)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            store.save_one(data_dir, definition)
+        except OSError:
+            unregister_factor(factor_id)
+            if previous is not None:
+                register_factor(previous)
+            raise
     return {"ok": True, "id": factor_id, "version": definition["version"]}
 
 

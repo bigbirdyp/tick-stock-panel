@@ -9,11 +9,16 @@
 """
 from __future__ import annotations
 
-import json
 import os
+from datetime import date, timedelta
+from functools import partial
+from typing import Literal
 
 import httpx
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+from tsp_mcp_server.factor_tools import date_range, register_factor_tools
 
 BASE = os.environ.get("TSP_BASE", "http://127.0.0.1:3018").rstrip("/")
 TOKEN = os.environ.get("TSP_TOKEN", "")
@@ -36,10 +41,13 @@ _client = httpx.Client(
 )
 
 
-def _call(method: str, path: str, **kw) -> str:
+def _call(method: str, path: str, *, tool_errors: bool = False, **kw) -> str:
     """调面板开放接口; 非 2xx 返回可读错误 (LLM 能据此纠正参数)。"""
     if not TOKEN:
-        return "错误: 未设置 TSP_TOKEN (面板 → 设置 → 开放接口 → 新建 Token)"
+        message = "错误: 未设置 TSP_TOKEN (面板 → 设置 → 开放接口 → 新建 Token)"
+        if tool_errors:
+            raise ToolError(message)
+        return message
     try:
         r = _client.request(method, path, **kw)
         r.raise_for_status()
@@ -49,9 +57,12 @@ def _call(method: str, path: str, **kw) -> str:
             detail = e.response.json().get("detail", e.response.text[:200])
         except Exception:  # noqa: BLE001
             detail = e.response.text[:200]
-        return f"HTTP {e.response.status_code}: {detail}"
+        message = f"HTTP {e.response.status_code}: {detail}"
     except httpx.HTTPError as e:
-        return f"连接失败 ({BASE}): {e}"
+        message = f"连接失败 ({BASE}): {e}"
+    if tool_errors:
+        raise ToolError(message)
+    return message
 
 
 def _has(scope: str) -> bool:
@@ -138,18 +149,28 @@ if _has("write:ext"):
 if _has("run:backtest"):
 
     @mcp.tool()
-    def run_backtest(strategy_id: str, symbols: list[str], days: int = 90) -> str:
-        """对指定标的跑策略回测 (纯 Polars 引擎), 返回指标/回合/净值。窗口别太大, 90~365 天为宜。"""
-        from datetime import date, timedelta
-
-        end = date.today()
-        start = end - timedelta(days=days)
-        return _call("POST", "/api/backtest/strategy/run", json={
-            "strategy_id": strategy_id,
-            "symbols": symbols,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
+    def run_backtest(strategy_id: str, symbols: list[str], days: int = 90,
+                     start: date | None = None, end: date | None = None,
+                     asset_type: Literal["stock", "etf"] = "stock",
+                     commission_pct: float | None = None, stamp_tax_pct: float | None = None,
+                     slippage_bps: float | None = None) -> str:
+        """策略回测。可传 start/end（YYYY-MM-DD）复测指定区间；省略两者则沿用最近 days 天。"""
+        fixed_range = start is not None or end is not None
+        if (start is None) != (end is None):
+            raise ToolError("固定区间须同时传 start 和 end")
+        if fixed_range and not symbols:
+            raise ToolError("固定区间复测须指定非空标的池")
+        if start is None:
+            end = date.today()
+            start = end - timedelta(days=days)
+        costs = {"commission_pct": commission_pct, "stamp_tax_pct": stamp_tax_pct, "slippage_bps": slippage_bps}
+        return _call("POST", "/api/backtest/strategy/run", tool_errors=fixed_range, json={
+            "strategy_id": strategy_id, "symbols": symbols, "asset_type": asset_type,
+            **date_range(start, end), **{k: v for k, v in costs.items() if v is not None},
         })
+
+
+register_factor_tools(mcp, SCOPES, partial(_call, tool_errors=True))
 
 
 def main() -> None:

@@ -396,6 +396,35 @@ def test_result_reconstructs_artifacts_without_exposing_definition(tmp_path):
     assert body["telemetry"]["panel_scans"] == 1
 
 
+def test_external_mining_failure_reports_reason_without_worker_traceback(tmp_path):
+    client, store = _client(tmp_path)
+    run = store.create({"factor_names": ["turnover_rate"]}, {"generation": "test"})
+    run_id = run["run_id"]
+    store.transition_status(run_id, "running")
+    reason = "matrix parquet fields unavailable"
+    debug = reason + "\nTraceback (most recent call last):\n  internal worker details"
+    store.transition_status(run_id, "failed", error=debug)
+    url = f"/api/backtest/mining/runs/{run_id}"
+    assert client.get(url, headers={"Authorization": "Bearer test"}).json()["error"] == reason
+    assert client.get(url).json()["error"] == debug
+
+
+def test_result_gate_agrees_with_strict_publication_gate(tmp_path):
+    client, store = _client(tmp_path)
+    _successful_run(store)
+    path = store.artifact_path("result-run", "candidates")
+    pl.read_parquet(path).with_columns(
+        pl.lit("high").alias("confidence"),
+        pl.lit(-0.1).alias("oos_worst_sharpe"),
+    ).write_parquet(path)
+    base = "/api/backtest/mining/runs/result-run"
+    candidate = client.get(f"{base}/result").json()["candidates"][0]
+    assert candidate["gate"]["qualified"] is False
+    publish = client.post(f"{base}/candidates/{quote(candidate['signature'], safe='')}/publish")
+    assert publish.status_code == 400
+    assert candidate["gate"]["reasons"][0] in publish.json()["detail"]
+
+
 def test_result_marks_legacy_fold_rows_without_evaluation_kind(tmp_path):
     client, store = _client(tmp_path)
     _successful_run(store)
